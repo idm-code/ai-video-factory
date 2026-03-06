@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Video Timeline Editor</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; background: #111; color: #eee; }
+    .top { position: sticky; top: 0; background: #1b1b1b; padding: 10px; border-bottom: 1px solid #333; display: flex; gap: 10px; align-items: center; }
+    button { background: #2a73ff; color: white; border: 0; border-radius: 6px; padding: 8px 12px; cursor: pointer; }
+    button.secondary { background: #444; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; padding: 12px; }
+    .card { background: #1c1c1c; border: 1px solid #333; border-radius: 8px; padding: 8px; }
+    video { width: 100%; border-radius: 6px; background: #000; }
+    input, select { width: 100%; box-sizing: border-box; margin-top: 4px; margin-bottom: 8px; background: #111; color: #eee; border: 1px solid #333; border-radius: 4px; padding: 6px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .danger { background: #a22; }
+    .ok { color: #84ff84; }
+    .err { color: #ff8a8a; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <button onclick="saveTimeline()">Save timeline</button>
+    <button onclick="renderFinal()">Render final.mp4</button>
+    <span id="status"></span>
+    <select id="librarySelect"></select>
+    <button class="secondary" onclick="addFromLibrary()">Add clip</button>
+  </div>
+  <div id="segments" class="grid"></div>
+
+<script>
+let timeline = null;
+let library = [];
+
+function clipUrl(path) {
+  return '/api/clip?path=' + encodeURIComponent(path);
+}
+
+function setStatus(text, ok=true) {
+  const el = document.getElementById('status');
+  el.className = ok ? 'ok' : 'err';
+  el.textContent = text;
+}
+
+async function loadData() {
+  const t = await fetch('/api/timeline').then(r => r.json());
+  timeline = t;
+  library = (await fetch('/api/library').then(r => r.json())).library || [];
+  renderLibrary();
+  renderSegments();
+}
+
+function renderLibrary() {
+  const sel = document.getElementById('librarySelect');
+  sel.innerHTML = '';
+  for (const p of library) {
+    const opt = document.createElement('option');
+    opt.value = p;
+    opt.textContent = p.split('\\').pop();
+    sel.appendChild(opt);
+  }
+}
+
+function renderSegments() {
+  const root = document.getElementById('segments');
+  root.innerHTML = '';
+  timeline.segments.forEach((seg, idx) => {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `
+      <video controls preload="metadata" src="${clipUrl(seg.clip_path)}#t=${seg.start},${seg.start + seg.duration}"></video>
+      <div>Segment ${idx + 1}</div>
+      <div class="row">
+        <div>
+          <label>Start (s)</label>
+          <input type="number" step="0.1" value="${seg.start}" onchange="updateSeg(${idx}, 'start', this.value)" />
+        </div>
+        <div>
+          <label>Duration (s)</label>
+          <input type="number" step="0.1" value="${seg.duration}" onchange="updateSeg(${idx}, 'duration', this.value)" />
+        </div>
+      </div>
+      <div>
+        <label>Clip path</label>
+        <input type="text" value="${seg.clip_path}" onchange="updateSeg(${idx}, 'clip_path', this.value)" />
+      </div>
+      <div class="row">
+        <button class="secondary" onclick="toggleSeg(${idx})">${seg.enabled ? 'Disable' : 'Enable'}</button>
+        <button class="danger" onclick="removeSeg(${idx})">Remove</button>
+      </div>
+    `;
+    root.appendChild(card);
+  });
+}
+
+function updateSeg(i, key, value) {
+  if (key === 'start' || key === 'duration') timeline.segments[i][key] = Number(value);
+  else timeline.segments[i][key] = value;
+}
+
+function toggleSeg(i) {
+  timeline.segments[i].enabled = !timeline.segments[i].enabled;
+  renderSegments();
+}
+
+function removeSeg(i) {
+  timeline.segments.splice(i, 1);
+  renderSegments();
+}
+
+async function addFromLibrary() {
+  const clip = document.getElementById('librarySelect').value;
+  if (!clip) return;
+  timeline.segments.push({ clip_path: clip, start: 0, duration: 4, enabled: true });
+  renderSegments();
+}
+
+async function saveTimeline() {
+  const res = await fetch('/api/timeline', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ segments: timeline.segments })
+  });
+  if (res.ok) setStatus('Timeline saved');
+  else setStatus('Failed to save timeline', false);
+}
+
+async function renderFinal() {
+  await saveTimeline();
+  setStatus('Rendering... this can take several minutes');
+  const res = await fetch('/api/render', { method: 'POST' });
+  if (!res.ok) {
+    const txt = await res.text();
+    setStatus('Render failed: ' + txt, false);
+    return;
+  }
+  const data = await res.json();
+  setStatus('Render complete: ' + data.out_path);
+}
+
+loadData().catch(e => setStatus('Load failed: ' + e, false));
+</script>
+</body>
+</html>
