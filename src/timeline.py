@@ -1,5 +1,6 @@
 import json
 import random
+import uuid
 from pathlib import Path
 
 from .utils import probe_duration_seconds
@@ -42,7 +43,27 @@ def create_timeline_manifest(
     timeline_path.parent.mkdir(parents=True, exist_ok=True)
 
     desired_seconds = max(float(target_minutes) * 60.0, probe_duration_seconds(Path(voice_path)))
-    library = [str(Path(p).resolve()) for p in clip_paths]
+    library_paths = [str(Path(p).resolve()) for p in clip_paths]
+    library = []
+    for p in library_paths:
+        clip_path = Path(p)
+        try:
+            clip_duration = round(float(probe_duration_seconds(clip_path)), 3)
+        except Exception:
+            clip_duration = 0.0
+        library.append(
+            {
+                "id": str(uuid.uuid4()),
+                "path": str(clip_path),
+                "name": clip_path.name,
+                "duration": clip_duration,
+            }
+        )
+
+    segments = _make_segments(clip_paths, desired_seconds, max_clip_segment_seconds)
+    for s in segments:
+        s["id"] = str(uuid.uuid4())
+        s["name"] = Path(s["clip_path"]).name
 
     data = {
         "topic": topic,
@@ -53,14 +74,48 @@ def create_timeline_manifest(
         "desired_seconds": round(desired_seconds, 3),
         "max_clip_segment_seconds": float(max_clip_segment_seconds),
         "library": library,
-        "segments": _make_segments(clip_paths, desired_seconds, max_clip_segment_seconds),
+        "segments": segments,
     }
     timeline_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return data
 
 
 def load_timeline(timeline_path: Path):
-    return json.loads(Path(timeline_path).read_text(encoding="utf-8"))
+    data = json.loads(Path(timeline_path).read_text(encoding="utf-8"))
+
+    if data.get("library") and isinstance(data["library"][0], str):
+        upgraded_library = []
+        for p in data["library"]:
+            clip_path = Path(p)
+            try:
+                clip_duration = round(float(probe_duration_seconds(clip_path)), 3)
+            except Exception:
+                clip_duration = 0.0
+            upgraded_library.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "path": str(clip_path),
+                    "name": clip_path.name,
+                    "duration": clip_duration,
+                }
+            )
+        data["library"] = upgraded_library
+
+    upgraded_segments = []
+    for seg in data.get("segments", []):
+        clip_path = str(seg.get("clip_path", ""))
+        upgraded_segments.append(
+            {
+                "id": seg.get("id") or str(uuid.uuid4()),
+                "name": seg.get("name") or Path(clip_path).name,
+                "clip_path": clip_path,
+                "start": float(seg.get("start", 0.0)),
+                "duration": float(seg.get("duration", 4.0)),
+                "enabled": bool(seg.get("enabled", True)),
+            }
+        )
+    data["segments"] = upgraded_segments
+    return data
 
 
 def save_timeline(timeline_path: Path, data):

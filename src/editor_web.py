@@ -22,6 +22,76 @@ def create_app(workspace_root: Path, timeline_path: Path):
 
     app = Flask(__name__)
 
+    def _to_editor_payload(data: dict) -> dict:
+        clips = []
+        for seg in data.get("segments", []):
+            clips.append(
+                {
+                    "id": seg.get("id"),
+                    "name": seg.get("name") or Path(seg.get("clip_path", "")).name,
+                    "path": seg.get("clip_path", ""),
+                    "start": float(seg.get("start", 0.0)),
+                    "duration": float(seg.get("duration", 4.0)),
+                    "enabled": bool(seg.get("enabled", True)),
+                }
+            )
+
+        return {
+            "topic": data.get("topic", ""),
+            "target_minutes": float(data.get("target_minutes", 10.0)),
+            "desired_seconds": float(data.get("desired_seconds", 0.0)),
+            "library": data.get("library", []),
+            "clips": clips,
+            "audio": {
+                "path": data.get("voice_path", ""),
+                "name": Path(data.get("voice_path", "")).name if data.get("voice_path") else "",
+            },
+            "subtitles": {
+                "path": data.get("srt_path", ""),
+                "name": Path(data.get("srt_path", "")).name if data.get("srt_path") else "",
+            },
+            "out_path": data.get("out_path", ""),
+            "max_clip_segment_seconds": float(data.get("max_clip_segment_seconds", 6.0)),
+        }
+
+    def _save_from_editor(payload: dict) -> dict:
+        data = load_timeline(timeline_path)
+
+        cleaned_clips = []
+        for clip in payload.get("clips", []):
+            clip_path = Path(clip.get("path", "")).resolve()
+            if not _is_inside(workspace_root, clip_path):
+                continue
+            cleaned_clips.append(
+                {
+                    "id": clip.get("id"),
+                    "name": clip.get("name") or clip_path.name,
+                    "clip_path": str(clip_path),
+                    "start": max(0.0, float(clip.get("start", 0.0))),
+                    "duration": max(1.0, float(clip.get("duration", 4.0))),
+                    "enabled": bool(clip.get("enabled", True)),
+                }
+            )
+
+        library = []
+        for item in payload.get("library", data.get("library", [])):
+            p = Path(item.get("path", "")).resolve() if isinstance(item, dict) else Path(str(item)).resolve()
+            if not _is_inside(workspace_root, p):
+                continue
+            library.append(
+                {
+                    "id": item.get("id") if isinstance(item, dict) else None,
+                    "path": str(p),
+                    "name": item.get("name") if isinstance(item, dict) and item.get("name") else p.name,
+                    "duration": float(item.get("duration", 0.0)) if isinstance(item, dict) else 0.0,
+                }
+            )
+
+        data["segments"] = cleaned_clips
+        data["library"] = library
+        save_timeline(timeline_path, data)
+        return data
+
     @app.get("/")
     def index():
         html_path = workspace_root / "web" / "editor.html"
@@ -29,31 +99,14 @@ def create_app(workspace_root: Path, timeline_path: Path):
 
     @app.get("/api/timeline")
     def api_timeline():
-        return jsonify(load_timeline(timeline_path))
+        return jsonify(_to_editor_payload(load_timeline(timeline_path)))
 
     @app.post("/api/timeline")
+    @app.put("/api/timeline")
     def api_timeline_save():
         payload = request.get_json(force=True, silent=False)
-        data = load_timeline(timeline_path)
-
-        segments = payload.get("segments", [])
-        cleaned = []
-        for seg in segments:
-            clip = Path(seg.get("clip_path", "")).resolve()
-            if not _is_inside(workspace_root, clip):
-                continue
-            cleaned.append(
-                {
-                    "clip_path": str(clip),
-                    "start": max(0.0, float(seg.get("start", 0))),
-                    "duration": max(1.0, float(seg.get("duration", 4))),
-                    "enabled": bool(seg.get("enabled", True)),
-                }
-            )
-
-        data["segments"] = cleaned
-        save_timeline(timeline_path, data)
-        return jsonify({"ok": True, "segments": len(cleaned)})
+        data = _save_from_editor(payload)
+        return jsonify({"ok": True, "clips": len(data.get("segments", []))})
 
     @app.get("/api/library")
     def api_library():

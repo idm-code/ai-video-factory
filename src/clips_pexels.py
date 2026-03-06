@@ -79,6 +79,9 @@ def download_clips_for_topic(topic: str, api_key: str, out_dir: Path, max_clips:
         r.raise_for_status()
         data = r.json()
         videos = data.get("videos", [])
+        filtered = [v for v in videos if _is_relevant_video(v, topic)]
+        if filtered:
+            videos = filtered
         random.shuffle(videos)
 
         for v in videos:
