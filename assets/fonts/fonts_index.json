@@ -1,0 +1,34 @@
+{
+  "fonts": [
+    {
+      "family": "Google Sans",
+      "variant": "regular",
+      "font_id": "google-sans",
+      "file_path": "C:\\Datos\\python\\ai-video-factory\\assets\\fonts\\Google_Sans-regular.ttf"
+    },
+    {
+      "family": "IBM Plex Sans",
+      "variant": "regular",
+      "font_id": "ibm-plex-sans",
+      "file_path": "C:\\Datos\\python\\ai-video-factory\\assets\\fonts\\IBM_Plex_Sans-regular.ttf"
+    },
+    {
+      "family": "Lora",
+      "variant": "regular",
+      "font_id": "lora",
+      "file_path": "C:\\Datos\\python\\ai-video-factory\\assets\\fonts\\Lora-regular.ttf"
+    },
+    {
+      "family": "M PLUS Rounded 1c",
+      "variant": "regular",
+      "font_id": "m-plus-rounded-1c",
+      "file_path": "C:\\Datos\\python\\ai-video-factory\\assets\\fonts\\M_PLUS_Rounded_1c-regular.ttf"
+    },
+    {
+      "family": "Karla",
+      "variant": "regular",
+      "font_id": "karla",
+      "file_path": "C:\\Datos\\python\\ai-video-factory\\assets\\fonts\\Karla-regular.ttf"
+    }
+  ]
+}

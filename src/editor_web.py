@@ -1,8 +1,10 @@
 import json
 import webbrowser
 from pathlib import Path
+from urllib.parse import quote
 
-from flask import Flask, Response, jsonify, request
+import requests
+from flask import Flask, Response, jsonify, request, send_from_directory
 
 from .timeline import load_timeline, save_timeline
 from .video_edit import build_video
@@ -19,8 +21,125 @@ def _is_inside(base: Path, candidate: Path) -> bool:
 def create_app(workspace_root: Path, timeline_path: Path):
     workspace_root = Path(workspace_root).resolve()
     timeline_path = Path(timeline_path).resolve()
+    fonts_dir = workspace_root / "assets" / "fonts"
+    fonts_dir.mkdir(parents=True, exist_ok=True)
+    fonts_index_path = fonts_dir / "fonts_index.json"
 
     app = Flask(__name__)
+
+    def _load_fonts_index() -> dict:
+        if not fonts_index_path.exists():
+            return {"fonts": []}
+        try:
+            return json.loads(fonts_index_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {"fonts": []}
+
+    def _save_fonts_index(data: dict) -> None:
+        fonts_index_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _list_local_fonts() -> list:
+        data = _load_fonts_index()
+        fonts = []
+        for item in data.get("fonts", []):
+            file_path = Path(item.get("file_path", ""))
+            if file_path.exists():
+                fonts.append(
+                    {
+                        "family": item.get("family"),
+                        "variant": item.get("variant", "regular"),
+                        "file_name": file_path.name,
+                        "file_path": str(file_path.resolve()),
+                        "url": f"/fonts/{quote(file_path.name)}",
+                    }
+                )
+        return fonts
+
+    def _fetch_google_fonts_catalog(limit: int = 120) -> list:
+        # Public API (no key required). Provides modern Google Fonts metadata.
+        r = requests.get(
+            "https://gwfh.mranftl.com/api/fonts",
+            params={"subsets": "latin", "sort": "popularity"},
+            timeout=30,
+        )
+        r.raise_for_status()
+        data = r.json()
+        items = data if isinstance(data, list) else []
+        result = []
+        for item in items[: max(1, min(limit, 300))]:
+            result.append(
+                {
+                    "id": item.get("id"),
+                    "family": item.get("family"),
+                    "category": item.get("category", ""),
+                    "variants": item.get("variants", []),
+                }
+            )
+        return result
+
+    def _install_google_font(font_id: str, family: str, variant: str = "regular") -> dict:
+        r = requests.get(
+            f"https://gwfh.mranftl.com/api/fonts/{font_id}",
+            params={"subsets": "latin"},
+            timeout=30,
+        )
+        r.raise_for_status()
+        data = r.json()
+
+        variants = data.get("variants", []) or []
+        chosen = None
+        if isinstance(variants, list):
+            chosen = next((v for v in variants if str(v.get("id", "")).lower() == variant.lower()), None)
+            if chosen is None:
+                chosen = next((v for v in variants if str(v.get("id", "")).lower() == "regular"), None)
+            if chosen is None and variants:
+                chosen = variants[0]
+        elif isinstance(variants, dict):
+            # Backward compatibility if API format changes
+            chosen = variants.get(variant) or variants.get("regular")
+        if not chosen:
+            raise RuntimeError("No downloadable variant found for this font")
+
+        ttf_url = chosen.get("ttf")
+        if not ttf_url:
+            # fallback to latin entry if available
+            latin = chosen.get("latin", {}) if isinstance(chosen.get("latin"), dict) else {}
+            ttf_url = latin.get("ttf")
+        if not ttf_url:
+            raise RuntimeError("No TTF URL available for selected font variant")
+
+        safe_family = "".join(ch for ch in (family or font_id) if ch.isalnum() or ch in ("-", "_", " ")).strip().replace(" ", "_")
+        safe_variant = "".join(ch for ch in (variant or "regular") if ch.isalnum() or ch in ("-", "_")).strip() or "regular"
+        file_name = f"{safe_family}-{safe_variant}.ttf"
+        out_path = fonts_dir / file_name
+
+        if not out_path.exists():
+            rr = requests.get(ttf_url, timeout=60)
+            rr.raise_for_status()
+            out_path.write_bytes(rr.content)
+
+        index = _load_fonts_index()
+        fonts = index.get("fonts", [])
+        existing = next((f for f in fonts if Path(f.get("file_path", "")).name == file_name), None)
+        if existing is None:
+            fonts.append(
+                {
+                    "family": family,
+                    "variant": safe_variant,
+                    "font_id": font_id,
+                    "file_path": str(out_path.resolve()),
+                }
+            )
+            index["fonts"] = fonts
+            _save_fonts_index(index)
+
+        return {
+            "family": family,
+            "variant": safe_variant,
+            "file_name": out_path.name,
+            "file_path": str(out_path.resolve()),
+            "url": f"/fonts/{quote(out_path.name)}",
+        }
 
     def _to_editor_payload(data: dict) -> dict:
         clips = []
@@ -52,6 +171,8 @@ def create_app(workspace_root: Path, timeline_path: Path):
             },
             "out_path": data.get("out_path", ""),
             "max_clip_segment_seconds": float(data.get("max_clip_segment_seconds", 6.0)),
+            "subtitle_style": data.get("subtitle_style", {}),
+            "overlays": data.get("overlays", []),
         }
 
     def _save_from_editor(payload: dict) -> dict:
@@ -89,6 +210,51 @@ def create_app(workspace_root: Path, timeline_path: Path):
 
         data["segments"] = cleaned_clips
         data["library"] = library
+
+        style = payload.get("subtitle_style", data.get("subtitle_style", {}))
+        data["subtitle_style"] = {
+            "font_family": str(style.get("font_family", "Arial")),
+            "font_file": str(style.get("font_file", "")),
+            "font_size": int(style.get("font_size", 18)),
+            "primary_color": str(style.get("primary_color", "&H00FFFFFF")),
+            "outline_color": str(style.get("outline_color", "&H00000000")),
+            "outline": int(style.get("outline", 2)),
+        }
+
+        overlays = []
+        valid_clip_ids = {c.get("id") for c in cleaned_clips}
+        for ov in payload.get("overlays", data.get("overlays", [])):
+            text = str(ov.get("text", "")).strip()
+            if not text:
+                continue
+
+            clip_id = ov.get("clip_id")
+            if clip_id and clip_id not in valid_clip_ids:
+                continue
+
+            start = float(ov.get("start", 0.0))
+            end = float(ov.get("end", 0.0))
+            if end <= start:
+                continue
+
+            overlays.append(
+                {
+                    "id": ov.get("id"),
+                    "clip_id": clip_id,
+                    "text": text,
+                    "start": max(0.0, start),
+                    "end": max(0.01, end),
+                    "x": str(ov.get("x", "(w-text_w)/2")),
+                    "y": str(ov.get("y", "h-160")),
+                    "font_size": int(ov.get("font_size", 44)),
+                    "font_color": str(ov.get("font_color", "white")),
+                    "box": int(ov.get("box", 1)),
+                    "box_color": str(ov.get("box_color", "black@0.45")),
+                    "relative": bool(ov.get("relative", False)),
+                }
+            )
+
+        data["overlays"] = overlays
         save_timeline(timeline_path, data)
         return data
 
@@ -151,8 +317,41 @@ def create_app(workspace_root: Path, timeline_path: Path):
             target_minutes=float(data.get("target_minutes", 10)),
             max_clip_segment_seconds=float(data.get("max_clip_segment_seconds", 6.0)),
             timeline_segments=data.get("segments", []),
+            subtitle_style=data.get("subtitle_style", {}),
+            overlays=data.get("overlays", []),
         )
         return jsonify({"ok": True, "out_path": data["out_path"]})
+
+    @app.get("/api/fonts/local")
+    def api_fonts_local():
+        return jsonify({"fonts": _list_local_fonts()})
+
+    @app.get("/api/fonts/catalog")
+    def api_fonts_catalog():
+        limit = int(request.args.get("limit", "120"))
+        try:
+            items = _fetch_google_fonts_catalog(limit=limit)
+        except Exception as exc:
+            return Response(f"Failed to fetch font catalog: {exc}", status=502)
+        return jsonify({"fonts": items})
+
+    @app.post("/api/fonts/install")
+    def api_fonts_install():
+        payload = request.get_json(force=True, silent=False)
+        font_id = str(payload.get("id", "")).strip()
+        family = str(payload.get("family", "")).strip()
+        variant = str(payload.get("variant", "regular")).strip() or "regular"
+        if not font_id or not family:
+            return Response("'id' and 'family' are required", status=400)
+        try:
+            font = _install_google_font(font_id=font_id, family=family, variant=variant)
+        except Exception as exc:
+            return Response(f"Failed to install font: {exc}", status=502)
+        return jsonify({"ok": True, "font": font})
+
+    @app.get("/fonts/<path:filename>")
+    def api_font_file(filename: str):
+        return send_from_directory(fonts_dir, filename, mimetype="font/ttf")
 
     return app
 

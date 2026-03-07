@@ -195,6 +195,35 @@
     }
 
     .muted{ color:var(--muted); font-size:12px; }
+
+    .font-preview{
+      margin-top:6px;
+      padding:10px;
+      border:1px solid var(--line);
+      border-radius:8px;
+      background:#0d1118;
+      min-height:44px;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      text-align:center;
+      color:#fff;
+      text-shadow:
+        -1px -1px 0 #000,
+        1px -1px 0 #000,
+        -1px 1px 0 #000,
+        1px 1px 0 #000;
+    }
+
+    .overlay-preview{
+      margin-top:6px;
+      padding:8px;
+      border:1px dashed var(--line);
+      border-radius:8px;
+      background:#10141d;
+      font-size:13px;
+      color:#eaf0ff;
+    }
   </style>
 </head>
 <body>
@@ -241,6 +270,39 @@
           <input id="clipDuration" type="number" step="0.1" min="1" />
         </div>
         <button id="btnApply">Aplicar cambios</button>
+
+        <hr style="border:0;border-top:1px solid var(--line);margin:6px 0;" />
+        <div class="label">Subtítulos · Fuente</div>
+        <select id="subFont" style="width:100%;background:#111827;border:1px solid var(--line);color:var(--text);border-radius:8px;padding:8px;font-size:12px;"></select>
+        <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;">
+          <input id="fontSearch" type="text" placeholder="Buscar fuente moderna..." />
+          <button id="btnFontSearch">Buscar</button>
+        </div>
+        <select id="fontCatalog" style="width:100%;background:#111827;border:1px solid var(--line);color:var(--text);border-radius:8px;padding:8px;font-size:12px;"></select>
+        <button id="btnInstallFont">Instalar fuente seleccionada</button>
+        <div id="fontStatus" class="muted"></div>
+        <div>
+          <div class="label">Subtítulos · Tamaño</div>
+          <input id="subFontSize" type="number" step="1" min="10" max="72" />
+        </div>
+        <div id="subFontPreview" class="font-preview">Previsualización de subtítulo</div>
+
+        <hr style="border:0;border-top:1px solid var(--line);margin:6px 0;" />
+        <div class="label">Texto incrustado (clip seleccionado)</div>
+        <input id="ovText" type="text" placeholder="Ej: Consejo clave" />
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          <div>
+            <div class="label">Desde (s)</div>
+            <input id="ovStart" type="number" step="0.1" min="0" value="0" />
+          </div>
+          <div>
+            <div class="label">Hasta (s)</div>
+            <input id="ovEnd" type="number" step="0.1" min="0.1" value="2.5" />
+          </div>
+        </div>
+        <button id="btnAddOverlay">Añadir texto al clip</button>
+        <div id="ovPreview" class="overlay-preview">Previsualización de texto incrustado</div>
+        <div id="overlayList" class="muted"></div>
       </div>
     </aside>
 
@@ -270,11 +332,21 @@
     audio: null,
     subtitles: null,
     target_minutes: 10,
+    subtitle_style: {
+      font_family: 'Arial',
+      font_size: 18,
+      primary_color: '&H00FFFFFF',
+      outline_color: '&H00000000',
+      outline: 2,
+    },
+    overlays: [],
   };
 
   let selectedLibraryPath = null;
   let selectedClipId = null;
   let dragClipId = null;
+  let localFonts = [];
+  let fontCatalog = [];
 
   const $ = (id) => document.getElementById(id);
 
@@ -292,7 +364,96 @@
     const res = await fetch('/api/timeline');
     if (!res.ok) throw new Error(await res.text());
     timeline = await res.json();
+    await loadFonts();
     renderAll();
+  }
+
+  async function loadFonts(search = '') {
+    const [localRes, catalogRes] = await Promise.all([
+      fetch('/api/fonts/local'),
+      fetch('/api/fonts/catalog?limit=140')
+    ]);
+
+    const localData = localRes.ok ? await localRes.json() : { fonts: [] };
+    const catalogData = catalogRes.ok ? await catalogRes.json() : { fonts: [] };
+
+    localFonts = localData.fonts || [];
+    const q = String(search || '').trim().toLowerCase();
+    fontCatalog = (catalogData.fonts || []).filter(f => !q || String(f.family || '').toLowerCase().includes(q));
+
+    renderFontSelectors();
+  }
+
+  function renderFontSelectors() {
+    const fontSelect = $('subFont');
+    const catalogSelect = $('fontCatalog');
+
+    const uniqueFamilies = new Map();
+    ['Arial', 'Segoe UI', 'Calibri'].forEach(f => uniqueFamilies.set(f, { family: f, file_path: '' }));
+    localFonts.forEach(f => uniqueFamilies.set(f.family, f));
+
+    fontSelect.innerHTML = '';
+    [...uniqueFamilies.values()].forEach(f => {
+      const opt = document.createElement('option');
+      opt.value = f.family;
+      opt.textContent = f.file_path ? `${f.family} (local)` : f.family;
+      opt.dataset.filePath = f.file_path || '';
+      fontSelect.appendChild(opt);
+    });
+
+    catalogSelect.innerHTML = '';
+    fontCatalog.forEach(f => {
+      const opt = document.createElement('option');
+      opt.value = f.id;
+      opt.textContent = `${f.family} · ${f.category || 'sans-serif'}`;
+      opt.dataset.family = f.family;
+      let preferredVariant = 'regular';
+      const variants = Array.isArray(f.variants) ? f.variants : [];
+      if (!variants.includes('regular') && variants.length) preferredVariant = variants[0];
+      opt.dataset.variant = preferredVariant;
+      catalogSelect.appendChild(opt);
+    });
+
+    const currentFamily = timeline.subtitle_style?.font_family || 'Arial';
+    if ([...fontSelect.options].some(o => o.value === currentFamily)) {
+      fontSelect.value = currentFamily;
+    }
+  }
+
+  function getSelectedLocalFontFile() {
+    const family = $('subFont').value;
+    const found = localFonts.find(f => f.family === family);
+    return found ? (found.file_path || '') : '';
+  }
+
+  async function installSelectedCatalogFont() {
+    const sel = $('fontCatalog');
+    const option = sel.options[sel.selectedIndex];
+    if (!option) return;
+
+    $('fontStatus').textContent = 'Instalando fuente...';
+    const res = await fetch('/api/fonts/install', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: option.value,
+        family: option.dataset.family,
+        variant: option.dataset.variant || 'regular'
+      })
+    });
+
+    if (!res.ok) {
+      $('fontStatus').textContent = 'Error instalando fuente';
+      return;
+    }
+
+    await loadFonts($('fontSearch').value || '');
+    $('subFont').value = option.dataset.family;
+    timeline.subtitle_style = timeline.subtitle_style || {};
+    timeline.subtitle_style.font_family = option.dataset.family;
+    timeline.subtitle_style.font_file = getSelectedLocalFontFile();
+    $('fontStatus').textContent = `Fuente instalada: ${option.dataset.family}`;
+    renderFontPreview();
   }
 
   function renderAll() {
@@ -300,6 +461,8 @@
     renderTimeline();
     renderTracksMeta();
     syncInspector();
+    renderOverlayList();
+    renderFontPreview();
   }
 
   function renderLibrary() {
@@ -404,6 +567,64 @@
     $('clipPath').value = clip ? (clip.path || '') : '';
     $('clipStart').value = clip ? Number(clip.start || 0) : 0;
     $('clipDuration').value = clip ? Number(clip.duration || 4) : 4;
+
+    timeline.subtitle_style = timeline.subtitle_style || {};
+    $('subFont').value = timeline.subtitle_style.font_family || 'Arial';
+    $('subFontSize').value = Number(timeline.subtitle_style.font_size || 18);
+    timeline.subtitle_style.font_file = timeline.subtitle_style.font_file || getSelectedLocalFontFile();
+    renderFontPreview();
+  }
+
+  function renderFontPreview() {
+    const style = timeline.subtitle_style || {};
+    const font = $('subFont')?.value || style.font_family || 'Arial';
+    const size = Math.max(10, Number($('subFontSize')?.value || style.font_size || 18));
+    const fontFile = getSelectedLocalFontFile();
+    if (fontFile) {
+      const encoded = encodeURIComponent(fontFile.split('\\').pop());
+      const styleId = 'dynamic-font-preview-style';
+      let styleEl = document.getElementById(styleId);
+      if (!styleEl) {
+        styleEl = document.createElement('style');
+        styleEl.id = styleId;
+        document.head.appendChild(styleEl);
+      }
+      styleEl.textContent = `@font-face { font-family: "Preview-${font}"; src: url('/fonts/${encoded}') format('truetype'); }`;
+    }
+
+    const previewFamily = fontFile ? `Preview-${font}` : font;
+    const sample = $('subFontPreview');
+    if (sample) {
+      sample.style.fontFamily = `'${previewFamily}', '${font}', Arial, sans-serif`;
+      sample.style.fontSize = `${size}px`;
+      sample.textContent = 'Esto es una previsualización de subtítulo';
+    }
+
+    const overlayInput = String($('ovText')?.value || '').trim();
+    const overlaySample = $('ovPreview');
+    if (overlaySample) {
+      overlaySample.style.fontFamily = `'${previewFamily}', '${font}', Arial, sans-serif`;
+      overlaySample.textContent = overlayInput || 'Previsualización de texto incrustado';
+    }
+  }
+
+  function renderOverlayList() {
+    const root = $('overlayList');
+    const selected = getSelectedClip();
+    if (!selected) {
+      root.textContent = 'Selecciona un clip para ver/editar textos.';
+      return;
+    }
+
+    const overlays = (timeline.overlays || []).filter(o => o.clip_id === selected.id);
+    if (!overlays.length) {
+      root.textContent = 'Sin textos en este clip.';
+      return;
+    }
+
+    root.innerHTML = overlays
+      .map(o => `• [${Number(o.start).toFixed(1)}-${Number(o.end).toFixed(1)}s] ${o.text}`)
+      .join('<br>');
   }
 
   function addClipFromLibrary(path) {
@@ -455,8 +676,54 @@
     if (!clip) return;
     clip.start = Math.max(0, Number($('clipStart').value || 0));
     clip.duration = Math.max(1, Number($('clipDuration').value || 4));
+
+    timeline.subtitle_style = timeline.subtitle_style || {};
+    timeline.subtitle_style.font_family = $('subFont').value || 'Arial';
+    timeline.subtitle_style.font_file = getSelectedLocalFontFile();
+    timeline.subtitle_style.font_size = Math.max(10, Number($('subFontSize').value || 18));
+
     renderTimeline();
+    renderOverlayList();
+    renderFontPreview();
     setStatus('Cambios aplicados', 'ok');
+  }
+
+  function addOverlayToSelectedClip() {
+    const clip = getSelectedClip();
+    if (!clip) {
+      setStatus('Selecciona un clip primero', 'err');
+      return;
+    }
+
+    const text = String($('ovText').value || '').trim();
+    const start = Math.max(0, Number($('ovStart').value || 0));
+    const end = Math.max(start + 0.1, Number($('ovEnd').value || 0));
+
+    if (!text) {
+      setStatus('Escribe un texto para incrustar', 'err');
+      return;
+    }
+
+    timeline.overlays = timeline.overlays || [];
+    timeline.overlays.push({
+      id: (crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now() + Math.random()),
+      clip_id: clip.id,
+      text,
+      start,
+      end,
+      x: '(w-text_w)/2',
+      y: 'h-160',
+      font_size: 44,
+      font_color: 'white',
+      box: 1,
+      box_color: 'black@0.45',
+      relative: true,
+    });
+
+    $('ovText').value = '';
+    renderOverlayList();
+    renderFontPreview();
+    setStatus('Texto añadido al clip', 'ok');
   }
 
   async function saveTimeline() {
@@ -511,8 +778,14 @@
   $('btnToggle').onclick = toggleSelected;
   $('btnDelete').onclick = deleteSelected;
   $('btnApply').onclick = applyInspectorChanges;
+  $('btnAddOverlay').onclick = addOverlayToSelectedClip;
   $('btnSave').onclick = saveTimeline;
   $('btnRender').onclick = renderFinal;
+  $('btnInstallFont').onclick = installSelectedCatalogFont;
+  $('btnFontSearch').onclick = () => loadFonts($('fontSearch').value || '');
+  $('subFont').addEventListener('input', renderFontPreview);
+  $('subFontSize').addEventListener('input', renderFontPreview);
+  $('ovText').addEventListener('input', renderFontPreview);
 
   loadTimeline().catch((err) => {
     setStatus('Error al cargar: ' + err.message, 'err');

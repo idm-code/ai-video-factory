@@ -73,6 +73,15 @@ def create_timeline_manifest(
         "out_path": str(Path(out_path).resolve()),
         "desired_seconds": round(desired_seconds, 3),
         "max_clip_segment_seconds": float(max_clip_segment_seconds),
+        "subtitle_style": {
+            "font_family": "Arial",
+            "font_file": "",
+            "font_size": 18,
+            "primary_color": "&H00FFFFFF",
+            "outline_color": "&H00000000",
+            "outline": 2,
+        },
+        "overlays": [],
         "library": library,
         "segments": segments,
     }
@@ -82,6 +91,19 @@ def create_timeline_manifest(
 
 def load_timeline(timeline_path: Path):
     data = json.loads(Path(timeline_path).read_text(encoding="utf-8"))
+
+    data.setdefault(
+        "subtitle_style",
+        {
+            "font_family": "Arial",
+            "font_file": "",
+            "font_size": 18,
+            "primary_color": "&H00FFFFFF",
+            "outline_color": "&H00000000",
+            "outline": 2,
+        },
+    )
+    data.setdefault("overlays", [])
 
     if data.get("library") and isinstance(data["library"][0], str):
         upgraded_library = []
@@ -115,6 +137,29 @@ def load_timeline(timeline_path: Path):
             }
         )
     data["segments"] = upgraded_segments
+
+    upgraded_overlays = []
+    for ov in data.get("overlays", []):
+        text = str(ov.get("text", "")).strip()
+        if not text:
+            continue
+        upgraded_overlays.append(
+            {
+                "id": ov.get("id") or str(uuid.uuid4()),
+                "clip_id": ov.get("clip_id"),
+                "text": text,
+                "start": float(ov.get("start", 0.0)),
+                "end": float(ov.get("end", 0.0)),
+                "x": ov.get("x", "(w-text_w)/2"),
+                "y": ov.get("y", "h-160"),
+                "font_size": int(ov.get("font_size", 44)),
+                "font_color": ov.get("font_color", "white"),
+                "box": int(ov.get("box", 1)),
+                "box_color": ov.get("box_color", "black@0.45"),
+                "relative": bool(ov.get("relative", False)),
+            }
+        )
+    data["overlays"] = upgraded_overlays
     return data
 
 
