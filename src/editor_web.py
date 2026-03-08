@@ -1,4 +1,6 @@
 import json
+import subprocess
+import uuid
 import webbrowser
 from pathlib import Path
 from urllib.parse import quote
@@ -6,7 +8,16 @@ from urllib.parse import quote
 import requests
 from flask import Flask, Response, jsonify, request, send_from_directory
 
+from .config import Settings
+from .script_gen import generate_script
+from .subtitles import whisper_to_srt
+from .timeline import create_timeline_manifest
+from .tts_edge import tts_to_mp3_edge
+from .tts_elevenlabs import tts_to_mp3_elevenlabs
+from .tts_gtts import tts_to_mp3_gtts
+from .tts_local import tts_to_wav_local
 from .timeline import load_timeline, save_timeline
+from .utils import probe_duration_seconds
 from .video_edit import build_video
 
 
@@ -21,6 +32,12 @@ def _is_inside(base: Path, candidate: Path) -> bool:
 def create_app(workspace_root: Path, timeline_path: Path):
     workspace_root = Path(workspace_root).resolve()
     timeline_path = Path(timeline_path).resolve()
+    settings = Settings.load()
+    work_dir = workspace_root / "work"
+    clips_dir = work_dir / "clips"
+    out_dir = workspace_root / "output"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
     fonts_dir = workspace_root / "assets" / "fonts"
     fonts_dir.mkdir(parents=True, exist_ok=True)
     fonts_index_path = fonts_dir / "fonts_index.json"
@@ -175,6 +192,232 @@ def create_app(workspace_root: Path, timeline_path: Path):
             "overlays": data.get("overlays", []),
         }
 
+    def _search_pexels(
+        query: str,
+        media_type: str,
+        per_page: int = 24,
+        page: int = 1,
+        orientation: str = "any",
+        min_duration: float = 0.0,
+        max_duration: float = 0.0,
+    ) -> dict:
+        if not settings.PEXELS_API_KEY:
+            return {"items": [], "has_more": False}
+
+        headers = {"Authorization": settings.PEXELS_API_KEY}
+        pexels_orientation = "landscape"
+        if orientation in {"landscape", "portrait", "square"}:
+            pexels_orientation = orientation
+
+        if media_type == "image":
+            r = requests.get(
+                "https://api.pexels.com/v1/search",
+                headers=headers,
+                params={"query": query, "per_page": per_page, "page": page, "orientation": pexels_orientation},
+                timeout=20,
+            )
+            r.raise_for_status()
+            payload = r.json()
+            out = []
+            for photo in payload.get("photos", []):
+                src = photo.get("src", {}) or {}
+                out.append(
+                    {
+                        "provider": "pexels",
+                        "media_type": "image",
+                        "id": str(photo.get("id")),
+                        "thumb_url": src.get("medium") or src.get("small") or "",
+                        "preview_url": src.get("large") or src.get("medium") or "",
+                        "download_url": src.get("original") or src.get("large") or src.get("medium") or "",
+                        "width": int(photo.get("width", 0) or 0),
+                        "height": int(photo.get("height", 0) or 0),
+                    }
+                )
+            total_results = int(payload.get("total_results", 0) or 0)
+            has_more = (page * per_page) < total_results if total_results > 0 else len(out) >= per_page
+            return {"items": out, "has_more": has_more}
+
+        r = requests.get(
+            "https://api.pexels.com/videos/search",
+            headers=headers,
+            params={"query": query, "per_page": per_page, "page": page, "orientation": pexels_orientation},
+            timeout=20,
+        )
+        r.raise_for_status()
+        payload = r.json()
+        out = []
+        for video in payload.get("videos", []):
+            duration_val = float(video.get("duration", 0.0) or 0.0)
+            if min_duration > 0 and duration_val < min_duration:
+                continue
+            if max_duration > 0 and duration_val > max_duration:
+                continue
+
+            files = [f for f in (video.get("video_files") or []) if f.get("file_type") == "video/mp4"]
+            if not files:
+                continue
+            best = sorted(files, key=lambda x: (x.get("width", 0) * x.get("height", 0)), reverse=True)[0]
+            out.append(
+                {
+                    "provider": "pexels",
+                    "media_type": "video",
+                    "id": str(video.get("id")),
+                    "thumb_url": video.get("image", ""),
+                    "preview_url": best.get("link", ""),
+                    "download_url": best.get("link", ""),
+                    "width": int(best.get("width", 0) or 0),
+                    "height": int(best.get("height", 0) or 0),
+                    "duration": duration_val,
+                }
+            )
+        total_results = int(payload.get("total_results", 0) or 0)
+        has_more = (page * per_page) < total_results if total_results > 0 else len(out) >= per_page
+        return {"items": out, "has_more": has_more}
+
+    def _search_pixabay(
+        query: str,
+        media_type: str,
+        per_page: int = 24,
+        page: int = 1,
+        orientation: str = "any",
+        min_duration: float = 0.0,
+        max_duration: float = 0.0,
+    ) -> dict:
+        if not settings.PIXABAY_API_KEY:
+            return {"items": [], "has_more": False}
+
+        pixabay_orientation = "all"
+        if orientation == "landscape":
+            pixabay_orientation = "horizontal"
+        elif orientation == "portrait":
+            pixabay_orientation = "vertical"
+
+        if media_type == "image":
+            r = requests.get(
+                "https://pixabay.com/api/",
+                params={
+                    "key": settings.PIXABAY_API_KEY,
+                    "q": query,
+                    "image_type": "photo",
+                    "orientation": pixabay_orientation,
+                    "per_page": per_page,
+                    "page": page,
+                },
+                timeout=20,
+            )
+            r.raise_for_status()
+            payload = r.json()
+            out = []
+            for item in payload.get("hits", []):
+                width_val = int(item.get("imageWidth", 0) or 0)
+                height_val = int(item.get("imageHeight", 0) or 0)
+                if orientation == "landscape" and width_val < height_val:
+                    continue
+                if orientation == "portrait" and height_val < width_val:
+                    continue
+                if orientation == "square" and abs(width_val - height_val) > max(80, int(0.15 * max(width_val, height_val, 1))):
+                    continue
+                out.append(
+                    {
+                        "provider": "pixabay",
+                        "media_type": "image",
+                        "id": str(item.get("id")),
+                        "thumb_url": item.get("previewURL", ""),
+                        "preview_url": item.get("webformatURL", ""),
+                        "download_url": item.get("largeImageURL") or item.get("webformatURL") or "",
+                        "width": width_val,
+                        "height": height_val,
+                    }
+                )
+            total_hits = int(payload.get("totalHits", 0) or 0)
+            has_more = (page * per_page) < total_hits if total_hits > 0 else len(out) >= per_page
+            return {"items": out, "has_more": has_more}
+
+        r = requests.get(
+            "https://pixabay.com/api/videos/",
+            params={
+                "key": settings.PIXABAY_API_KEY,
+                "q": query,
+                "per_page": per_page,
+                "page": page,
+            },
+            timeout=20,
+        )
+        r.raise_for_status()
+        payload = r.json()
+        out = []
+        for item in payload.get("hits", []):
+            videos = item.get("videos", {}) or {}
+            chosen = videos.get("large") or videos.get("medium") or videos.get("small") or {}
+            download_url = chosen.get("url", "")
+            if not download_url:
+                continue
+
+            width_val = int(chosen.get("width", 0) or 0)
+            height_val = int(chosen.get("height", 0) or 0)
+            if orientation == "landscape" and width_val < height_val:
+                continue
+            if orientation == "portrait" and height_val < width_val:
+                continue
+
+            duration_val = float(item.get("duration", 0.0) or 0.0)
+            if min_duration > 0 and duration_val < min_duration:
+                continue
+            if max_duration > 0 and duration_val > max_duration:
+                continue
+
+            out.append(
+                {
+                    "provider": "pixabay",
+                    "media_type": "video",
+                    "id": str(item.get("id")),
+                    "thumb_url": item.get("videos", {}).get("tiny", {}).get("thumbnail", "")
+                    or item.get("userImageURL", ""),
+                    "preview_url": download_url,
+                    "download_url": download_url,
+                    "width": width_val,
+                    "height": height_val,
+                    "duration": duration_val,
+                }
+            )
+        total_hits = int(payload.get("totalHits", 0) or 0)
+        has_more = (page * per_page) < total_hits if total_hits > 0 else len(out) >= per_page
+        return {"items": out, "has_more": has_more}
+
+    def _create_voice_from_text(text: str, tts_provider: str, voice: str, speech_rate: str) -> Path:
+        tts_provider = (tts_provider or "gtts").lower()
+        if tts_provider == "elevenlabs":
+            if not settings.ELEVENLABS_API_KEY or not settings.ELEVENLABS_VOICE_ID:
+                raise RuntimeError("ELEVENLABS_API_KEY / ELEVENLABS_VOICE_ID missing in .env")
+            voice_path = out_dir / "voice.mp3"
+            tts_to_mp3_elevenlabs(
+                text=text,
+                out_path=voice_path,
+                api_key=settings.ELEVENLABS_API_KEY,
+                voice_id=settings.ELEVENLABS_VOICE_ID,
+                model_id=settings.ELEVENLABS_MODEL,
+            )
+            return voice_path
+
+        if tts_provider == "local":
+            lang = (voice or "en").split("-")[0].split("_")[0].lower() or "en"
+            voice_path = out_dir / "voice.wav"
+            tts_to_wav_local(text=text, out_path=voice_path, lang=lang)
+            return voice_path
+
+        if tts_provider == "edge":
+            voice_path = out_dir / "voice.mp3"
+            try:
+                tts_to_mp3_edge(text=text, out_path=voice_path, voice=voice or "en-US-EmmaNeural", rate=speech_rate or "+0%")
+                return voice_path
+            except Exception:
+                pass
+
+        lang = (voice or "en").split("-")[0].split("_")[0].lower() or "en"
+        voice_path = out_dir / "voice.mp3"
+        tts_to_mp3_gtts(text=text, out_path=voice_path, lang=lang)
+        return voice_path
+
     def _save_from_editor(payload: dict) -> dict:
         data = load_timeline(timeline_path)
 
@@ -309,6 +552,14 @@ def create_app(workspace_root: Path, timeline_path: Path):
     @app.post("/api/render")
     def api_render():
         data = load_timeline(timeline_path)
+        segments = data.get("segments", [])
+        if not segments:
+            return Response("Timeline vacío: añade clips antes de renderizar", status=400)
+        if not data.get("voice_path") or not Path(data["voice_path"]).exists():
+            return Response("Falta audio: usa 'Generar guion+voz+subs'", status=400)
+        if not data.get("srt_path") or not Path(data["srt_path"]).exists():
+            return Response("Faltan subtítulos: usa 'Generar guion+voz+subs'", status=400)
+
         build_video(
             clip_paths=[],
             voice_path=Path(data["voice_path"]),
@@ -316,11 +567,189 @@ def create_app(workspace_root: Path, timeline_path: Path):
             out_path=Path(data["out_path"]),
             target_minutes=float(data.get("target_minutes", 10)),
             max_clip_segment_seconds=float(data.get("max_clip_segment_seconds", 6.0)),
-            timeline_segments=data.get("segments", []),
+            timeline_segments=segments,
             subtitle_style=data.get("subtitle_style", {}),
             overlays=data.get("overlays", []),
         )
         return jsonify({"ok": True, "out_path": data["out_path"]})
+
+    @app.get("/api/media/search")
+    def api_media_search():
+        query = str(request.args.get("q", "")).strip()
+        media_type = str(request.args.get("type", "video")).strip().lower()
+        providers = [p.strip().lower() for p in str(request.args.get("providers", "pexels,pixabay")).split(",") if p.strip()]
+        page = max(1, int(request.args.get("page", "1") or 1))
+        per_page = max(1, min(60, int(request.args.get("per_page", "18") or 18)))
+        orientation = str(request.args.get("orientation", "any")).strip().lower()
+        min_duration = max(0.0, float(request.args.get("min_duration", "0") or 0.0))
+        max_duration = max(0.0, float(request.args.get("max_duration", "0") or 0.0))
+        if not query:
+            return jsonify({"items": [], "page": page, "per_page": per_page, "has_more": False})
+
+        if media_type not in {"video", "image"}:
+            return Response("Invalid media type", status=400)
+
+        items = []
+        has_more = False
+        try:
+            if "pexels" in providers:
+                pexels_result = _search_pexels(
+                    query=query,
+                    media_type=media_type,
+                    per_page=per_page,
+                    page=page,
+                    orientation=orientation,
+                    min_duration=min_duration,
+                    max_duration=max_duration,
+                )
+                items.extend(pexels_result.get("items", []))
+                has_more = has_more or bool(pexels_result.get("has_more", False))
+            if "pixabay" in providers:
+                pixabay_result = _search_pixabay(
+                    query=query,
+                    media_type=media_type,
+                    per_page=per_page,
+                    page=page,
+                    orientation=orientation,
+                    min_duration=min_duration,
+                    max_duration=max_duration,
+                )
+                items.extend(pixabay_result.get("items", []))
+                has_more = has_more or bool(pixabay_result.get("has_more", False))
+        except Exception as exc:
+            return Response(f"Search failed: {exc}", status=502)
+
+        return jsonify({"items": items[:120], "page": page, "per_page": per_page, "has_more": has_more})
+
+    @app.post("/api/media/import")
+    def api_media_import():
+        payload = request.get_json(force=True, silent=False)
+        item = payload.get("item", {}) or {}
+        url = str(item.get("download_url", "")).strip()
+        media_type = str(item.get("media_type", "video")).strip().lower()
+        if not url:
+            return Response("download_url required", status=400)
+
+        media_id = str(item.get("id") or uuid.uuid4())
+        if media_type == "image":
+            image_seconds = max(1.0, float(payload.get("image_seconds", 5.0)))
+            img_path = clips_dir / f"img_{media_id}.jpg"
+            rr = requests.get(url, timeout=60)
+            rr.raise_for_status()
+            img_path.write_bytes(rr.content)
+
+            clip_path = clips_dir / f"img_{media_id}.mp4"
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-loop",
+                    "1",
+                    "-t",
+                    f"{image_seconds:.2f}",
+                    "-i",
+                    str(img_path),
+                    "-vf",
+                    "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=30,format=yuv420p",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-r",
+                    "30",
+                    str(clip_path),
+                ],
+                check=True,
+            )
+        else:
+            clip_path = clips_dir / f"clip_{media_id}.mp4"
+            rr = requests.get(url, timeout=90)
+            rr.raise_for_status()
+            clip_path.write_bytes(rr.content)
+
+        clip_duration = 0.0
+        try:
+            clip_duration = float(probe_duration_seconds(clip_path))
+        except Exception:
+            pass
+
+        data = load_timeline(timeline_path)
+        data.setdefault("library", []).append(
+            {
+                "id": str(uuid.uuid4()),
+                "path": str(clip_path.resolve()),
+                "name": clip_path.name,
+                "duration": round(clip_duration, 3),
+            }
+        )
+
+        if bool(payload.get("add_to_timeline", True)):
+            data.setdefault("segments", []).append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "name": clip_path.name,
+                    "clip_path": str(clip_path.resolve()),
+                    "start": 0.0,
+                    "duration": max(1.0, min(6.0, clip_duration if clip_duration > 0 else 6.0)),
+                    "enabled": True,
+                }
+            )
+
+        save_timeline(timeline_path, data)
+        return jsonify({"ok": True, "path": str(clip_path.resolve())})
+
+    @app.post("/api/project/generate")
+    def api_project_generate():
+        payload = request.get_json(force=True, silent=False)
+        topic = str(payload.get("topic", "")).strip()
+        if not topic:
+            return Response("topic is required", status=400)
+
+        minutes = float(payload.get("minutes", 8.0))
+        script_provider = str(payload.get("script_provider", "auto"))
+        tts_provider = str(payload.get("tts_provider", "gtts"))
+        voice = str(payload.get("voice", "en-US-EmmaNeural"))
+        speech_rate = str(payload.get("speech_rate", "+0%"))
+
+        script_text = generate_script(
+            topic=topic,
+            target_minutes=int(max(1, round(minutes))),
+            ollama_base_url=settings.OLLAMA_BASE_URL,
+            ollama_model=settings.OLLAMA_MODEL,
+            openai_api_key=settings.OPENAI_API_KEY,
+            openai_model=settings.OPENAI_MODEL,
+            provider=script_provider,
+        )
+
+        script_path = out_dir / "script.txt"
+        script_path.write_text(script_text, encoding="utf-8")
+
+        voice_path = _create_voice_from_text(script_text, tts_provider, voice, speech_rate)
+        srt_path = out_dir / "subtitles.srt"
+        whisper_to_srt(audio_path=voice_path, srt_path=srt_path)
+
+        # NO recrear timeline con segmentos automáticos.
+        current = load_timeline(timeline_path)
+        current["topic"] = topic
+        current["target_minutes"] = float(minutes)
+        current["desired_seconds"] = float(max(0.0, minutes * 60.0))
+        current["voice_path"] = str(Path(voice_path).resolve())
+        current["srt_path"] = str(Path(srt_path).resolve())
+        current["out_path"] = str(Path(current.get("out_path") or (out_dir / "final.mp4")).resolve())
+        current.setdefault("library", [])
+        current.setdefault("segments", [])
+        current.setdefault("overlays", [])
+        save_timeline(timeline_path, current)
+
+        return jsonify(
+            {
+                "ok": True,
+                "topic": topic,
+                "script_path": str(script_path),
+                "voice_path": str(voice_path),
+                "srt_path": str(srt_path),
+            }
+        )
 
     @app.get("/api/fonts/local")
     def api_fonts_local():

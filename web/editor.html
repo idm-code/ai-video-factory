@@ -42,6 +42,28 @@
       align-content:start;
     }
 
+    .search-panel{
+      display:grid;
+      gap:8px;
+      margin-bottom:10px;
+    }
+
+    .inline-fields{
+      display:grid;
+      grid-template-columns: 1fr 110px;
+      gap:8px;
+    }
+
+    select{
+      width:100%;
+      background:#111827;
+      border:1px solid var(--line);
+      color:var(--text);
+      border-radius:8px;
+      padding:8px;
+      font-size:12px;
+    }
+
     .clip-card{
       background:var(--panel2);
       border:1px solid var(--line);
@@ -230,8 +252,51 @@
   <div class="app">
     <aside class="panel left">
       <h3>Media Bin</h3>
+      <div class="search-panel">
+        <div class="label">Temática del proyecto</div>
+        <div class="inline-fields">
+          <input id="topicInput" type="text" placeholder="Ej: AI wedding templates" />
+          <input id="topicMinutes" type="number" min="1" step="1" value="8" />
+        </div>
+        <button id="btnGenerateProject">Generar guion+voz+subs</button>
+
+        <hr style="border:0;border-top:1px solid var(--line);margin:4px 0;" />
+        <div class="label">Buscar clips / imágenes en tiempo real</div>
+        <input id="mediaSearch" type="text" placeholder="Keywords o #hashtags..." />
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          <select id="mediaType">
+            <option value="video">Video</option>
+            <option value="image">Imagen</option>
+          </select>
+          <select id="mediaProviders">
+            <option value="pexels,pixabay">Pexels + Pixabay</option>
+            <option value="pexels">Solo Pexels</option>
+            <option value="pixabay">Solo Pixabay</option>
+          </select>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          <select id="mediaOrientation">
+            <option value="any">Orientación: cualquiera</option>
+            <option value="landscape">Horizontal</option>
+            <option value="portrait">Vertical</option>
+            <option value="square">Cuadrada</option>
+          </select>
+          <input id="mediaPerPage" type="number" min="6" max="60" step="6" value="18" title="Resultados por página" />
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          <input id="mediaMinDuration" type="number" min="0" step="0.5" value="0" placeholder="Duración mínima (s)" />
+          <input id="mediaMaxDuration" type="number" min="0" step="0.5" value="0" placeholder="Duración máxima (s)" />
+        </div>
+      </div>
       <div id="libraryInfo" class="muted" style="margin-bottom:10px;"></div>
       <div id="mediaBin" class="bin"></div>
+      <h3 style="margin-top:12px;">Resultados búsqueda</h3>
+      <div id="searchInfo" class="muted" style="margin-bottom:8px;"></div>
+      <div id="mediaSearchResults" class="bin"></div>
+      <div style="display:grid;gap:8px;margin-top:8px;">
+        <button id="btnLoadMore" style="display:none;">Cargar más</button>
+        <div id="searchSentinel" class="muted" style="text-align:center;">Desplázate para cargar más</div>
+      </div>
     </aside>
 
     <main class="panel center">
@@ -241,6 +306,8 @@
         <button id="btnMoveRight">Mover derecha</button>
         <button id="btnToggle">Enable/Disable</button>
         <button id="btnDelete" class="danger">Eliminar</button>
+        <button id="btnDeleteSelected" class="danger">Eliminar seleccionados</button>
+        <button id="btnClearTimeline" class="danger">Vaciar timeline</button>
         <button id="btnSave">Guardar timeline</button>
         <button id="btnRender" class="primary">Render final</button>
         <span id="status" class="status">Listo</span>
@@ -344,7 +411,22 @@
 
   let selectedLibraryPath = null;
   let selectedClipId = null;
+  let selectedClipIds = new Set();
   let dragClipId = null;
+  let searchTimer = null;
+  let searchObserver = null;
+  let searchState = {
+    query: '',
+    type: 'video',
+    providers: 'pexels,pixabay',
+    orientation: 'any',
+    min_duration: 0,
+    max_duration: 0,
+    page: 1,
+    per_page: 18,
+    has_more: false,
+    loading: false,
+  };
   let localFonts = [];
   let fontCatalog = [];
 
@@ -457,12 +539,197 @@
   }
 
   function renderAll() {
+    if ($('topicInput') && !($('topicInput').value || '').trim()) {
+      $('topicInput').value = timeline.topic || '';
+    }
+    if ($('topicMinutes')) {
+      $('topicMinutes').value = Math.max(1, Math.round(Number(timeline.target_minutes || 8)));
+    }
     renderLibrary();
     renderTimeline();
     renderTracksMeta();
     syncInspector();
     renderOverlayList();
     renderFontPreview();
+  }
+
+  function renderSearchResults(items, append = false) {
+    const root = $('mediaSearchResults');
+    if (!append) {
+      root.innerHTML = '';
+    }
+
+    (items || []).forEach((item) => {
+      const card = document.createElement('div');
+      card.className = 'clip-card';
+
+      const preview = item.media_type === 'image'
+        ? `<img src="${item.thumb_url || item.preview_url}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;" />`
+        : `<video muted preload="metadata" src="${item.preview_url || ''}"></video>`;
+
+      card.innerHTML = `
+        ${preview}
+        <div class="name">${item.provider} · ${item.media_type}</div>
+        <div class="meta">${Number(item.duration || 0).toFixed(1)}s</div>
+        <button class="add-btn">Añadir a biblioteca</button>
+      `;
+
+      card.querySelector('.add-btn').onclick = async (e) => {
+        e.stopPropagation();
+        await importSearchItem(item); // add_to_timeline=false ya está correcto
+      };
+
+      root.appendChild(card);
+    });
+
+    const totalRendered = root.children.length;
+    $('searchInfo').textContent = `${totalRendered} resultados · página ${searchState.page}`;
+    $('btnLoadMore').style.display = searchState.has_more ? 'block' : 'none';
+  }
+
+  function readSearchFilters() {
+    searchState.query = String($('mediaSearch').value || '').trim();
+    searchState.type = $('mediaType').value;
+    searchState.providers = $('mediaProviders').value;
+    searchState.orientation = $('mediaOrientation').value;
+    searchState.per_page = Math.max(6, Math.min(60, Number($('mediaPerPage').value || 18)));
+    searchState.min_duration = Math.max(0, Number($('mediaMinDuration').value || 0));
+    searchState.max_duration = Math.max(0, Number($('mediaMaxDuration').value || 0));
+  }
+
+  async function searchMediaRealtime(reset = true) {
+    readSearchFilters();
+
+    if (reset) {
+      searchState.page = 1;
+      searchState.has_more = false;
+    }
+
+    const q = searchState.query;
+    if (!q) {
+      renderSearchResults([], false);
+      searchState.has_more = false;
+      $('btnLoadMore').style.display = 'none';
+      return;
+    }
+
+    if (searchState.loading) return;
+    searchState.loading = true;
+    setStatus('Buscando media...');
+
+    const params = new URLSearchParams({
+      q,
+      type: searchState.type,
+      providers: searchState.providers,
+      page: String(searchState.page),
+      per_page: String(searchState.per_page),
+      orientation: searchState.orientation,
+      min_duration: String(searchState.min_duration),
+      max_duration: String(searchState.max_duration),
+    });
+
+    const res = await fetch(`/api/media/search?${params.toString()}`);
+    if (!res.ok) {
+      setStatus('Error buscando media', 'err');
+      searchState.loading = false;
+      return;
+    }
+
+    const data = await res.json();
+    searchState.has_more = Boolean(data.has_more);
+    renderSearchResults(data.items || [], !reset);
+    setStatus('Resultados actualizados', 'ok');
+    searchState.loading = false;
+  }
+
+  async function loadMoreSearchResults() {
+    if (searchState.loading || !searchState.has_more) return;
+    searchState.page += 1;
+    await searchMediaRealtime(false);
+  }
+
+  function setupSearchInfiniteScroll() {
+    if (searchObserver) {
+      searchObserver.disconnect();
+      searchObserver = null;
+    }
+    const sentinel = $('searchSentinel');
+    if (!sentinel) return;
+
+    searchObserver = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        if (entry && entry.isIntersecting && searchState.has_more && !searchState.loading) {
+          loadMoreSearchResults();
+        }
+      },
+      { root: null, rootMargin: '120px', threshold: 0.1 }
+    );
+    searchObserver.observe(sentinel);
+  }
+
+  async function importSearchItem(item) {
+    setStatus('Importando media...');
+    const payload = {
+      item,
+      add_to_timeline: false, // antes true
+      image_seconds: 6,
+    };
+    const res = await fetch('/api/media/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      setStatus('Error importando media', 'err');
+      return;
+    }
+
+    await loadTimeline();
+    setStatus('Media añadida a biblioteca', 'ok');
+  }
+
+  async function generateProjectFromTopic() {
+    try {
+      const topic = String($('topicInput')?.value || '').trim();
+      if (!topic) {
+        setStatus('Introduce una temática', 'err');
+        return;
+      }
+
+      setStatus('Generando guion/voz/subs...');
+      const payload = {
+        topic,
+        minutes: Number($('topicMinutes')?.value || 8),
+        script_provider: 'auto',
+        tts_provider: 'gtts',
+        voice: 'en',
+        speech_rate: '+0%',
+      };
+
+      const res = await fetch('/api/project/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const txt = await res.text();
+        setStatus('Error generando proyecto: ' + txt, 'err');
+        return;
+      }
+
+      await loadTimeline();
+      // opcional: lanzar búsqueda automática con la temática
+      if ($('mediaSearch') && !$('mediaSearch').value.trim()) {
+        $('mediaSearch').value = topic;
+        await searchMediaRealtime(true);
+      }
+
+      setStatus('Guion + voz + subtítulos listos. Ahora añade clips al timeline.', 'ok');
+    } catch (err) {
+      setStatus('Error: ' + (err?.message || err), 'err');
+    }
   }
 
   function renderLibrary() {
@@ -483,6 +750,8 @@
       `;
       card.onclick = () => {
         selectedLibraryPath = item.path;
+        [...root.querySelectorAll('.clip-card')].forEach((el) => el.classList.remove('selected'));
+        card.classList.add('selected');
         $('preview').src = clipUrl(item.path);
       };
       card.ondblclick = () => addClipFromLibrary(item.path);
@@ -493,16 +762,29 @@
   function renderTimeline() {
     const track = $('trackVideo');
     track.innerHTML = '';
-
-    track.ondragover = (e) => {
-      e.preventDefault();
-    };
+    track.ondragover = (e) => e.preventDefault();
 
     (timeline.clips || []).forEach((clip, idx) => {
+      const isSelected = selectedClipIds.has(clip.id);
       const seg = document.createElement('div');
-      seg.className = 'seg' + (clip.enabled ? '' : ' disabled') + (clip.id === selectedClipId ? ' selected' : '');
+      seg.className = 'seg' + (clip.enabled ? '' : ' disabled') + (isSelected ? ' selected' : '');
       seg.textContent = `${idx + 1}. ${clip.name || 'clip'} (${Number(clip.duration || 0).toFixed(1)}s)`;
       seg.draggable = true;
+
+      seg.onclick = (e) => {
+        if (e.ctrlKey || e.metaKey) {
+          if (selectedClipIds.has(clip.id)) selectedClipIds.delete(clip.id);
+          else selectedClipIds.add(clip.id);
+          selectedClipId = clip.id;
+        } else {
+          selectedClipIds = new Set([clip.id]);
+          selectedClipId = clip.id;
+        }
+        $('preview').src = clipUrl(clip.path) + `#t=${Number(clip.start || 0)},${Number(clip.start || 0) + Number(clip.duration || 4)}`;
+        syncInspector();
+        renderTimeline();
+      };
+
       seg.ondragstart = () => {
         dragClipId = clip.id;
       };
@@ -513,12 +795,6 @@
         e.preventDefault();
         if (!dragClipId || dragClipId === clip.id) return;
         reorderClips(dragClipId, clip.id);
-      };
-      seg.onclick = () => {
-        selectedClipId = clip.id;
-        $('preview').src = clipUrl(clip.path) + `#t=${Number(clip.start || 0)},${Number(clip.start || 0) + Number(clip.duration || 4)}`;
-        syncInspector();
-        renderTimeline();
       };
       track.appendChild(seg);
     });
@@ -642,7 +918,50 @@
       enabled: true,
     });
     selectedClipId = id;
+    selectedClipIds = new Set([id]);
     renderAll();
+  }
+
+  function applyInspectorChanges() {
+    const clip = getSelectedClip();
+    if (!clip) {
+      setStatus('Selecciona un clip del timeline', 'err');
+      return;
+    }
+
+    clip.start = Math.max(0, Number($('clipStart').value || 0));
+    clip.duration = Math.max(1, Number($('clipDuration').value || 4));
+    clip.name = String($('clipName').value || clip.name || '').trim() || clip.name;
+    renderAll();
+    setStatus('Cambios del clip aplicados', 'ok');
+  }
+
+  function addOverlayToSelectedClip() {
+    const clip = getSelectedClip();
+    if (!clip) {
+      setStatus('Selecciona un clip para añadir texto', 'err');
+      return;
+    }
+
+    const text = String($('ovText').value || '').trim();
+    if (!text) {
+      setStatus('Escribe un texto para incrustar', 'err');
+      return;
+    }
+
+    const start = Math.max(0, Number($('ovStart').value || 0));
+    const end = Math.max(start + 0.1, Number($('ovEnd').value || (start + 2.5)));
+
+    timeline.overlays = timeline.overlays || [];
+    timeline.overlays.push({
+      clip_id: clip.id,
+      text,
+      start,
+      end,
+    });
+    renderOverlayList();
+    renderFontPreview();
+    setStatus('Texto incrustado añadido al clip', 'ok');
   }
 
   function moveSelected(delta) {
@@ -667,63 +986,25 @@
     const i = clips.findIndex(c => c.id === selectedClipId);
     if (i < 0) return;
     clips.splice(i, 1);
+    selectedClipIds.delete(selectedClipId);
     selectedClipId = clips.length ? clips[Math.max(0, i - 1)].id : null;
+    if (selectedClipId) selectedClipIds = new Set([selectedClipId]);
     renderAll();
   }
 
-  function applyInspectorChanges() {
-    const clip = getSelectedClip();
-    if (!clip) return;
-    clip.start = Math.max(0, Number($('clipStart').value || 0));
-    clip.duration = Math.max(1, Number($('clipDuration').value || 4));
-
-    timeline.subtitle_style = timeline.subtitle_style || {};
-    timeline.subtitle_style.font_family = $('subFont').value || 'Arial';
-    timeline.subtitle_style.font_file = getSelectedLocalFontFile();
-    timeline.subtitle_style.font_size = Math.max(10, Number($('subFontSize').value || 18));
-
-    renderTimeline();
-    renderOverlayList();
-    renderFontPreview();
-    setStatus('Cambios aplicados', 'ok');
+  function deleteSelectedBulk() {
+    if (!selectedClipIds.size) return;
+    timeline.clips = (timeline.clips || []).filter(c => !selectedClipIds.has(c.id));
+    selectedClipId = null;
+    selectedClipIds.clear();
+    renderAll();
   }
 
-  function addOverlayToSelectedClip() {
-    const clip = getSelectedClip();
-    if (!clip) {
-      setStatus('Selecciona un clip primero', 'err');
-      return;
-    }
-
-    const text = String($('ovText').value || '').trim();
-    const start = Math.max(0, Number($('ovStart').value || 0));
-    const end = Math.max(start + 0.1, Number($('ovEnd').value || 0));
-
-    if (!text) {
-      setStatus('Escribe un texto para incrustar', 'err');
-      return;
-    }
-
-    timeline.overlays = timeline.overlays || [];
-    timeline.overlays.push({
-      id: (crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now() + Math.random()),
-      clip_id: clip.id,
-      text,
-      start,
-      end,
-      x: '(w-text_w)/2',
-      y: 'h-160',
-      font_size: 44,
-      font_color: 'white',
-      box: 1,
-      box_color: 'black@0.45',
-      relative: true,
-    });
-
-    $('ovText').value = '';
-    renderOverlayList();
-    renderFontPreview();
-    setStatus('Texto añadido al clip', 'ok');
+  function clearTimelineClips() {
+    timeline.clips = [];
+    selectedClipId = null;
+    selectedClipIds.clear();
+    renderAll();
   }
 
   async function saveTimeline() {
@@ -755,6 +1036,16 @@
   }
 
   async function renderFinal() {
+    // el render SI es el montaje final
+    if (!timeline.clips || !timeline.clips.length) {
+      setStatus('Añade clips al timeline antes de renderizar', 'err');
+      return;
+    }
+    if (!timeline.audio?.path || !timeline.subtitles?.path) {
+      setStatus('Primero genera guion+voz+subs', 'err');
+      return;
+    }
+
     await saveTimeline();
     setStatus('Renderizando...');
     const res = await fetch('/api/render', { method: 'POST' });
@@ -767,29 +1058,62 @@
     setStatus('Render final listo: ' + (data.out_path || ''), 'ok');
   }
 
+  function on(id, event, handler) {
+    const el = $(id);
+    if (el) el.addEventListener(event, handler);
+  }
+
   $('btnAddFromSelection').onclick = () => {
     if (!selectedLibraryPath && timeline.library?.length) {
       selectedLibraryPath = timeline.library[0].path;
     }
-    if (selectedLibraryPath) addClipFromLibrary(selectedLibraryPath);
+    if (selectedLibraryPath) {
+      addClipFromLibrary(selectedLibraryPath);
+      setStatus('Clip añadido al timeline', 'ok');
+    } else {
+      setStatus('Selecciona un clip de la biblioteca', 'err');
+    }
   };
   $('btnMoveLeft').onclick = () => moveSelected(-1);
   $('btnMoveRight').onclick = () => moveSelected(1);
   $('btnToggle').onclick = toggleSelected;
   $('btnDelete').onclick = deleteSelected;
+  $('btnDeleteSelected').onclick = deleteSelectedBulk;
+  $('btnClearTimeline').onclick = clearTimelineClips;
   $('btnApply').onclick = applyInspectorChanges;
   $('btnAddOverlay').onclick = addOverlayToSelectedClip;
   $('btnSave').onclick = saveTimeline;
   $('btnRender').onclick = renderFinal;
   $('btnInstallFont').onclick = installSelectedCatalogFont;
   $('btnFontSearch').onclick = () => loadFonts($('fontSearch').value || '');
+  $('btnGenerateProject').onclick = generateProjectFromTopic;
+  $('btnLoadMore').onclick = loadMoreSearchResults;
+
+  on('btnGenerateProject', 'click', generateProjectFromTopic);
+  on('btnLoadMore', 'click', loadMoreSearchResults);
+  on('mediaSearch', 'input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => searchMediaRealtime(true), 350);
+  });
+  on('mediaType', 'change', () => searchMediaRealtime(true));
+  on('mediaProviders', 'change', () => searchMediaRealtime(true));
+  on('mediaOrientation', 'change', () => searchMediaRealtime(true));
+  on('mediaPerPage', 'change', () => searchMediaRealtime(true));
+  on('mediaMinDuration', 'change', () => searchMediaRealtime(true));
+  on('mediaMaxDuration', 'change', () => searchMediaRealtime(true));
+
   $('subFont').addEventListener('input', renderFontPreview);
   $('subFontSize').addEventListener('input', renderFontPreview);
   $('ovText').addEventListener('input', renderFontPreview);
 
-  loadTimeline().catch((err) => {
-    setStatus('Error al cargar: ' + err.message, 'err');
-  });
+  (async () => {
+    try {
+      await loadTimeline();
+    } catch (err) {
+      setStatus('Error al cargar: ' + err.message, 'err');
+    }
+  })();
+  setupSearchInfiniteScroll();
 </script>
 </body>
 </html>

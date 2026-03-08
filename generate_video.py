@@ -10,20 +10,43 @@ from src.tts_elevenlabs import tts_to_mp3_elevenlabs
 from src.clips_pexels import download_clips_for_topic
 from src.subtitles import whisper_to_srt
 from src.video_edit import build_video
-from src.timeline import create_timeline_manifest
+from src.timeline import create_timeline_manifest, load_timeline, save_timeline
 from src.editor_web import run_editor
+
+def _empty_timeline(out_final: Path) -> dict:
+    return {
+        "topic": "",
+        "target_minutes": 8.0,
+        "desired_seconds": 0.0,
+        "voice_path": "",
+        "srt_path": "",
+        "out_path": str(out_final.resolve()),
+        "max_clip_segment_seconds": 6.0,
+        "subtitle_style": {
+            "font_family": "Arial",
+            "font_file": "",
+            "font_size": 18,
+            "primary_color": "&H00FFFFFF",
+            "outline_color": "&H00000000",
+            "outline": 2,
+        },
+        "overlays": [],
+        "library": [],
+        "segments": [],
+    }
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("topic", nargs="*", default=["AI wedding templates on Etsy"])
+    parser.add_argument("topic", nargs="*", default=[])  # <- antes tenía un topic por defecto
     parser.add_argument("--minutes", type=float, default=10.0, help="Target video length in minutes")
     parser.add_argument("--voice", type=str, default="en-US-EmmaNeural", help="Voice id for edge/elevenlabs or language hint for gtts/local")
     parser.add_argument("--tts-provider", choices=["gtts", "edge", "elevenlabs", "local"], default="gtts")
     parser.add_argument("--script-provider", choices=["auto", "gpt", "ollama"], default="auto")
     parser.add_argument("--speech-rate", type=str, default="+0%", help="Edge-TTS rate. Example: -10% or +5%")
     parser.add_argument("--clips", type=int, default=18, help="How many stock clips to download")
-    parser.add_argument("--edit-ui", action="store_true", help="Open web editor to manually adjust timeline before final render")
+    parser.add_argument("--edit-ui", action="store_true", help="(legacy) no longer required")
     parser.add_argument("--ui-port", type=int, default=8765, help="Port for web editor")
+    parser.add_argument("--batch", action="store_true", help="Run full automatic pipeline (old behavior)")
     args = parser.parse_args()
 
     topic = " ".join(args.topic).strip()
@@ -36,6 +59,18 @@ def main():
     (work / "audio").mkdir(parents=True, exist_ok=True)
     (work / "tmp").mkdir(parents=True, exist_ok=True)
     out.mkdir(parents=True, exist_ok=True)
+
+    timeline_path = work / "timeline.json"
+
+    # MODO NUEVO POR DEFECTO: siempre abrir editor web, sin autoproceso
+    if not args.batch:
+        data = _empty_timeline(out / "final.mp4")
+        if topic:
+            data["topic"] = topic
+        data["target_minutes"] = float(args.minutes)
+        save_timeline(timeline_path, data)
+        run_editor(workspace_root=root, timeline_path=timeline_path, port=args.ui_port)
+        return
 
     print(f"\n[1/5] Generating script for: {topic}")
     script_text = generate_script(
