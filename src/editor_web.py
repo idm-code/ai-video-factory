@@ -287,6 +287,7 @@ def create_app(workspace_root: Path, timeline_path: Path):
         if not settings.PIXABAY_API_KEY:
             return {"items": [], "has_more": False}
 
+        # Pixabay orientation params
         pixabay_orientation = "all"
         if orientation == "landscape":
             pixabay_orientation = "horizontal"
@@ -294,16 +295,21 @@ def create_app(workspace_root: Path, timeline_path: Path):
             pixabay_orientation = "vertical"
 
         if media_type == "image":
+            params = {
+                "key": settings.PIXABAY_API_KEY,
+                "q": query,
+                "image_type": "photo",
+                "per_page": min(per_page, 200),
+                "page": page,
+                "safesearch": "true",
+            }
+            # orientation "all" no es válido para Pixabay images; solo horizontal/vertical
+            if pixabay_orientation in ("horizontal", "vertical"):
+                params["orientation"] = pixabay_orientation
+
             r = requests.get(
                 "https://pixabay.com/api/",
-                params={
-                    "key": settings.PIXABAY_API_KEY,
-                    "q": query,
-                    "image_type": "photo",
-                    "orientation": pixabay_orientation,
-                    "per_page": per_page,
-                    "page": page,
-                },
+                params=params,
                 timeout=20,
             )
             r.raise_for_status()
@@ -312,53 +318,74 @@ def create_app(workspace_root: Path, timeline_path: Path):
             for item in payload.get("hits", []):
                 width_val = int(item.get("imageWidth", 0) or 0)
                 height_val = int(item.get("imageHeight", 0) or 0)
-                if orientation == "landscape" and width_val < height_val:
-                    continue
-                if orientation == "portrait" and height_val < width_val:
-                    continue
+                # Filtro orientación en cliente para "square" y "any"
                 if orientation == "square" and abs(width_val - height_val) > max(80, int(0.15 * max(width_val, height_val, 1))):
                     continue
-                out.append(
-                    {
-                        "provider": "pixabay",
-                        "media_type": "image",
-                        "id": str(item.get("id")),
-                        "thumb_url": item.get("previewURL", ""),
-                        "preview_url": item.get("webformatURL", ""),
-                        "download_url": item.get("largeImageURL") or item.get("webformatURL") or "",
-                        "width": width_val,
-                        "height": height_val,
-                    }
-                )
+                out.append({
+                    "provider": "pixabay",
+                    "media_type": "image",
+                    "id": str(item.get("id")),
+                    "thumb_url": item.get("previewURL", ""),
+                    "preview_url": item.get("webformatURL", ""),
+                    "download_url": item.get("largeImageURL") or item.get("webformatURL") or "",
+                    "width": width_val,
+                    "height": height_val,
+                    "duration": 0,
+                })
             total_hits = int(payload.get("totalHits", 0) or 0)
             has_more = (page * per_page) < total_hits if total_hits > 0 else len(out) >= per_page
             return {"items": out, "has_more": has_more}
 
+        # ── VIDEO ──
+        # La API de vídeos de Pixabay NO acepta orientation
+        params = {
+            "key": settings.PIXABAY_API_KEY,
+            "q": query,
+            "video_type": "all",
+            "per_page": min(per_page, 200),
+            "page": page,
+            "safesearch": "true",
+        }
+
         r = requests.get(
             "https://pixabay.com/api/videos/",
-            params={
-                "key": settings.PIXABAY_API_KEY,
-                "q": query,
-                "per_page": per_page,
-                "page": page,
-            },
+            params=params,
             timeout=20,
         )
-        r.raise_for_status()
+
+        # Log para debug
+        print(f"[Pixabay video] status={r.status_code} url={r.url}")
+        if not r.ok:
+            print(f"[Pixabay video] error body: {r.text[:300]}")
+            r.raise_for_status()
+
         payload = r.json()
+        print(f"[Pixabay video] totalHits={payload.get('totalHits')} hits={len(payload.get('hits', []))}")
+
         out = []
         for item in payload.get("hits", []):
             videos = item.get("videos", {}) or {}
-            chosen = videos.get("large") or videos.get("medium") or videos.get("small") or {}
+            # Intentar calidades en orden descendente
+            chosen = (
+                videos.get("large")
+                or videos.get("medium")
+                or videos.get("small")
+                or videos.get("tiny")
+                or {}
+            )
             download_url = chosen.get("url", "")
             if not download_url:
                 continue
 
             width_val = int(chosen.get("width", 0) or 0)
             height_val = int(chosen.get("height", 0) or 0)
-            if orientation == "landscape" and width_val < height_val:
+
+            # Filtro orientación manual (la API no lo soporta)
+            if orientation == "landscape" and width_val > 0 and height_val > 0 and width_val < height_val:
                 continue
-            if orientation == "portrait" and height_val < width_val:
+            if orientation == "portrait" and width_val > 0 and height_val > 0 and height_val < width_val:
+                continue
+            if orientation == "square" and width_val > 0 and height_val > 0 and abs(width_val - height_val) > max(80, int(0.15 * max(width_val, height_val, 1))):
                 continue
 
             duration_val = float(item.get("duration", 0.0) or 0.0)
@@ -367,20 +394,25 @@ def create_app(workspace_root: Path, timeline_path: Path):
             if max_duration > 0 and duration_val > max_duration:
                 continue
 
-            out.append(
-                {
-                    "provider": "pixabay",
-                    "media_type": "video",
-                    "id": str(item.get("id")),
-                    "thumb_url": item.get("videos", {}).get("tiny", {}).get("thumbnail", "")
-                    or item.get("userImageURL", ""),
-                    "preview_url": download_url,
-                    "download_url": download_url,
-                    "width": width_val,
-                    "height": height_val,
-                    "duration": duration_val,
-                }
+            # Thumbnail: pixabay vídeos tiene userImageURL o videos.tiny.thumbnail
+            thumb = (
+                videos.get("tiny", {}).get("thumbnail", "")
+                or item.get("userImageURL", "")
+                or item.get("picture_id", "")
             )
+
+            out.append({
+                "provider": "pixabay",
+                "media_type": "video",
+                "id": str(item.get("id")),
+                "thumb_url": thumb,
+                "preview_url": download_url,
+                "download_url": download_url,
+                "width": width_val,
+                "height": height_val,
+                "duration": duration_val,
+            })
+
         total_hits = int(payload.get("totalHits", 0) or 0)
         has_more = (page * per_page) < total_hits if total_hits > 0 else len(out) >= per_page
         return {"items": out, "has_more": has_more}

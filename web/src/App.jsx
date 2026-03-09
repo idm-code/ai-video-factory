@@ -170,17 +170,31 @@ export default function App() {
 
   // ── Search ──
   const searchTimerRef = useRef(null);
+  const [searchType, setSearchType] = useState('video');
+  const [searchProviders, setSearchProviders] = useState('pexels,pixabay');
+  const [searchOrientation, setSearchOrientation] = useState('any');
+
   function triggerSearch(value, page = 1) {
     if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
     searchTimerRef.current = setTimeout(async () => {
       const q2 = (value || '').trim();
       if (!q2 || q2.length < 2) return;
+      const perPage = Number(document.getElementById('perPageSelect')?.value || 16);
       toast('Buscando...');
       try {
-        const data = await searchMedia({ q: q2, type: 'video', providers: 'pexels,pixabay', page, per_page: 16, orientation: 'any', min_duration: 0, max_duration: 0 });
+        const data = await searchMedia({
+          q: q2,
+          type: searchType,
+          providers: searchProviders,
+          page,
+          per_page: perPage,
+          orientation: searchOrientation,
+          min_duration: 0,
+          max_duration: 0,
+        });
         const items = data.items || [];
         setResults((prev) => page === 1 ? items : [...prev, ...items]);
-        setHasMore(data.has_more ?? items.length >= 16);
+        setHasMore(data.has_more ?? items.length >= perPage);
         setSearchPage(page);
         toast(`${page === 1 ? items.length : 'más'} resultados`);
       } catch (e) { toast(`Error búsqueda: ${e.message}`, 'err'); }
@@ -363,7 +377,9 @@ export default function App() {
 
         <div style={S.section}>
           <div style={S.sectionTitle}>Buscar media</div>
-          <div style={{ display: 'flex', gap: 6 }}>
+
+          {/* Barra de búsqueda */}
+          <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
             <input
               value={q}
               onChange={(e) => setQ(e.target.value)}
@@ -372,6 +388,59 @@ export default function App() {
               style={S.input}
             />
             <button style={S.btnAccent} onClick={() => triggerSearch(q, 1)}>↵</button>
+          </div>
+
+          {/* Filtros en grid 2x2 */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+            <div>
+              <label style={S.label}>Tipo</label>
+              <select
+                value={searchType}
+                onChange={(e) => setSearchType(e.target.value)}
+                style={{ ...S.input, padding: '4px 6px' }}
+              >
+                <option value="video">Video</option>
+                <option value="image">Imagen</option>
+              </select>
+            </div>
+            <div>
+              <label style={S.label}>Fuente</label>
+              <select
+                value={searchProviders}
+                onChange={(e) => setSearchProviders(e.target.value)}
+                style={{ ...S.input, padding: '4px 6px' }}
+              >
+                <option value="pexels,pixabay">Pexels + Pixabay</option>
+                <option value="pexels">Solo Pexels</option>
+                <option value="pixabay">Solo Pixabay</option>
+              </select>
+            </div>
+            <div>
+              <label style={S.label}>Orientación</label>
+              <select
+                value={searchOrientation}
+                onChange={(e) => setSearchOrientation(e.target.value)}
+                style={{ ...S.input, padding: '4px 6px' }}
+              >
+                <option value="any">Cualquiera</option>
+                <option value="landscape">Horizontal</option>
+                <option value="portrait">Vertical</option>
+                <option value="square">Cuadrada</option>
+              </select>
+            </div>
+            <div>
+              <label style={S.label}>Resultados/pág</label>
+              <select
+                onChange={(e) => {/* se usa en triggerSearch via per_page */}}
+                style={{ ...S.input, padding: '4px 6px' }}
+                defaultValue="16"
+                id="perPageSelect"
+              >
+                <option value="8">8</option>
+                <option value="16">16</option>
+                <option value="32">32</option>
+              </select>
+            </div>
           </div>
         </div>
 
