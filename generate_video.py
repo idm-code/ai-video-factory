@@ -1,4 +1,5 @@
 import argparse
+import uuid
 from pathlib import Path
 
 from src.config import Settings
@@ -12,6 +13,7 @@ from src.subtitles import whisper_to_srt
 from src.video_edit import build_video
 from src.timeline import create_timeline_manifest, load_timeline, save_timeline
 from src.editor_web import run_editor
+from src.utils import probe_duration_seconds
 
 def _empty_timeline(out_final: Path) -> dict:
     return {
@@ -30,10 +32,141 @@ def _empty_timeline(out_final: Path) -> dict:
             "outline_color": "&H00000000",
             "outline": 2,
         },
+        "audio_dirty": False,
         "overlays": [],
         "library": [],
         "segments": [],
     }
+
+
+def _load_or_bootstrap_timeline(root: Path, timeline_path: Path, topic: str, minutes: float) -> dict:
+    out_dir = root / "output"
+    clips_dir = root / "work" / "clips"
+    out_final = out_dir / "final.mp4"
+
+    if timeline_path.exists():
+        try:
+            data = load_timeline(timeline_path)
+        except Exception:
+            data = _empty_timeline(out_final)
+    else:
+        data = _empty_timeline(out_final)
+
+    changed = False
+
+    if not str(data.get("out_path", "")).strip():
+        data["out_path"] = str(out_final.resolve())
+        changed = True
+
+    if topic and not str(data.get("topic", "")).strip():
+        data["topic"] = topic
+        changed = True
+
+    if not data.get("target_minutes"):
+        data["target_minutes"] = float(minutes)
+        changed = True
+
+    voice_candidates = [out_dir / "voice.mp3", out_dir / "voice.wav"]
+    if not str(data.get("voice_path", "")).strip():
+        for candidate in voice_candidates:
+            if candidate.exists():
+                data["voice_path"] = str(candidate.resolve())
+                changed = True
+                break
+
+    srt_candidate = out_dir / "subtitles.srt"
+    if not str(data.get("srt_path", "")).strip() and srt_candidate.exists():
+        data["srt_path"] = str(srt_candidate.resolve())
+        changed = True
+
+    script_candidate = out_dir / "script.txt"
+    if not str(data.get("script_text", "")).strip() and script_candidate.exists():
+        try:
+            data["script_text"] = script_candidate.read_text(encoding="utf-8")
+            changed = True
+        except Exception:
+            pass
+
+    if not data.get("library"):
+        clip_paths = sorted(clips_dir.glob("*.mp4"))
+        library = []
+        for clip_path in clip_paths:
+            try:
+                duration = round(float(probe_duration_seconds(clip_path)), 3)
+            except Exception:
+                duration = 0.0
+            library.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "path": str(clip_path.resolve()),
+                    "name": clip_path.name,
+                    "duration": duration,
+                }
+            )
+        if library:
+            data["library"] = library
+            changed = True
+
+    def _looks_autofilled_from_library(tl: dict) -> bool:
+        """Detecta un timeline autogenerado (batch) que repite toda la biblioteca.
+
+        Heurística segura para evitar que el editor arranque con 100+ clips
+        cuando el usuario solo quiere editar desde cero.
+        """
+        segments = tl.get("segments") or []
+        library = tl.get("library") or []
+        if not isinstance(segments, list) or not isinstance(library, list):
+            return False
+        if len(library) < 2 or len(segments) <= len(library):
+            return False
+
+        lib_dur_by_path = {}
+        for item in library:
+            if not isinstance(item, dict):
+                continue
+            p = str(item.get("path", ""))
+            try:
+                lib_dur_by_path[p] = float(item.get("duration", 0.0) or 0.0)
+            except Exception:
+                lib_dur_by_path[p] = 0.0
+
+        unique_paths = set()
+        for seg in segments:
+            if not isinstance(seg, dict):
+                return False
+            p = str(seg.get("clip_path", ""))
+            if not p:
+                return False
+            unique_paths.add(p)
+            try:
+                if abs(float(seg.get("start", 0.0) or 0.0)) > 1e-6:
+                    return False
+            except Exception:
+                return False
+
+            # Si coincide con la biblioteca, verificamos que sea el clip completo.
+            if p in lib_dur_by_path and lib_dur_by_path[p] > 0:
+                try:
+                    seg_d = float(seg.get("duration", 0.0) or 0.0)
+                except Exception:
+                    return False
+                if abs(seg_d - lib_dur_by_path[p]) > 0.15:
+                    return False
+
+        return len(unique_paths) <= max(1, len(library))
+
+    # En modo UI, si el timeline parece autogenerado y nunca fue tocado desde la UI,
+    # arrancar vacío (sin borrar la biblioteca).
+    if not bool(data.get("editor_touched", False)) and _looks_autofilled_from_library(data):
+        data["segments"] = []
+        data["desired_seconds"] = 0.0
+        data["audio_dirty"] = True
+        changed = True
+
+    if changed:
+        save_timeline(timeline_path, data)
+
+    return data
 
 def main():
     parser = argparse.ArgumentParser()
@@ -62,13 +195,14 @@ def main():
 
     timeline_path = work / "timeline.json"
 
-    # MODO NUEVO POR DEFECTO: siempre abrir editor web, sin autoproceso
+    # MODO NUEVO POR DEFECTO: abrir editor web preservando o recuperando timeline existente
     if not args.batch:
-        data = _empty_timeline(out / "final.mp4")
-        if topic:
-            data["topic"] = topic
-        data["target_minutes"] = float(args.minutes)
-        save_timeline(timeline_path, data)
+        _load_or_bootstrap_timeline(
+            root=root,
+            timeline_path=timeline_path,
+            topic=topic,
+            minutes=float(args.minutes),
+        )
         run_editor(workspace_root=root, timeline_path=timeline_path, port=args.ui_port)
         return
 

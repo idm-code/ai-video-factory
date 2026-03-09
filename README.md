@@ -69,3 +69,16 @@ Esto genera `work/timeline.json` y abre un editor web local donde puedes:
 	- `edge`: calidad alta, puede fallar según región/bloqueo de servicio.
 	- `elevenlabs`: requiere cuota y API key.
 	- `local`: fallback offline con voces del sistema.
+
+## UI / despliegue (único)
+
+La app web se sirve directamente desde Flask usando [web/editor.html](web/editor.html) vía [`create_app`](src/editor_web.py).  
+No se usa build de Vite para producción local.
+
+Inicio recomendado:
+
+```bash
+python generate_video.py "tu temática" --minutes 8
+```
+
+Esto abre el editor local y todo el flujo se hace desde ahí.

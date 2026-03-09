@@ -162,7 +162,7 @@
 
     .label{ font-size:12px; color:var(--muted); }
 
-    input[type="text"], input[type="number"]{
+    input[type="text"], input[type="number"], textarea{
       width:100%;
       background:#111827;
       border:1px solid var(--line);
@@ -172,79 +172,82 @@
       font-size:12px;
     }
 
-    .timeline{
-      grid-column:1 / span 3;
-      background:var(--panel);
-      padding:10px;
-      overflow:auto;
+    textarea{
+      min-height:120px;
+      resize:vertical;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
 
-    .tracks{ display:grid; gap:8px; }
-
-    .track{
-      border:1px solid var(--line);
-      border-radius:10px;
-      background:var(--panel2);
-      padding:8px;
-    }
-
-    .lane{
-      display:flex;
-      gap:6px;
-      overflow:auto;
-      min-height:34px;
-      padding-bottom:4px;
-    }
-
-    .seg{
-      background:#2a3550;
-      border:1px solid #39507b;
-      border-radius:8px;
-      padding:6px 10px;
-      font-size:12px;
-      white-space:nowrap;
-      user-select:none;
-      cursor:pointer;
-    }
-
-    .seg.disabled{
-      opacity:0.4;
-      text-decoration:line-through;
-    }
-
-    .seg.selected{
-      outline:2px solid var(--accent);
+    .gen-grid{
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:8px;
     }
 
     .muted{ color:var(--muted); font-size:12px; }
 
-    .font-preview{
-      margin-top:6px;
-      padding:10px;
-      border:1px solid var(--line);
-      border-radius:8px;
-      background:#0d1118;
-      min-height:44px;
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      text-align:center;
-      color:#fff;
-      text-shadow:
-        -1px -1px 0 #000,
-        1px -1px 0 #000,
-        -1px 1px 0 #000,
-        1px 1px 0 #000;
+    .clip-card.selected{
+      outline:2px solid var(--accent);
+      outline-offset:1px;
     }
 
+    .timeline{
+      grid-column: 1 / -1;
+      grid-row: 2;
+      padding:10px 12px;
+      overflow:auto;
+      border-top:1px solid var(--line);
+    }
+
+    .tracks{ display:grid; gap:10px; }
+
+    .track{
+      display:grid;
+      grid-template-columns: 34px 1fr;
+      align-items:start;
+      gap:8px;
+    }
+
+    .lane{
+      min-height:42px;
+      border:1px solid var(--line);
+      border-radius:10px;
+      padding:6px;
+      background:#131722;
+      display:flex;
+      flex-wrap:wrap;
+      gap:6px;
+      align-content:flex-start;
+    }
+
+    .seg{
+      display:inline-flex;
+      align-items:center;
+      max-width:260px;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      border:1px solid #334a75;
+      background:#223454;
+      border-radius:999px;
+      padding:6px 10px;
+      font-size:12px;
+      color:var(--text);
+      cursor:pointer;
+      user-select:none;
+    }
+
+    .seg.selected{ border-color:var(--accent); background:#1c4b77; }
+    .seg.disabled{ opacity:.45; text-decoration:line-through; }
+
+    .font-preview,
     .overlay-preview{
-      margin-top:6px;
-      padding:8px;
-      border:1px dashed var(--line);
+      border:1px solid var(--line);
       border-radius:8px;
-      background:#10141d;
-      font-size:13px;
-      color:#eaf0ff;
+      background:#111827;
+      padding:10px;
+      font-size:14px;
+      line-height:1.35;
     }
   </style>
 </head>
@@ -253,14 +256,6 @@
     <aside class="panel left">
       <h3>Media Bin</h3>
       <div class="search-panel">
-        <div class="label">Temática del proyecto</div>
-        <div class="inline-fields">
-          <input id="topicInput" type="text" placeholder="Ej: AI wedding templates" />
-          <input id="topicMinutes" type="number" min="1" step="1" value="8" />
-        </div>
-        <button id="btnGenerateProject">Generar guion+voz+subs</button>
-
-        <hr style="border:0;border-top:1px solid var(--line);margin:4px 0;" />
         <div class="label">Buscar clips / imágenes en tiempo real</div>
         <input id="mediaSearch" type="text" placeholder="Keywords o #hashtags..." />
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
@@ -375,6 +370,7 @@
 
     <section class="panel timeline">
       <h3>Timeline</h3>
+      <div id="timelineSummary" class="muted" style="margin-bottom:8px;"></div>
       <div class="tracks">
         <div class="track">
           <div class="label">V1</div>
@@ -413,6 +409,9 @@
   let selectedClipId = null;
   let selectedClipIds = new Set();
   let dragClipId = null;
+  let dragLibraryPath = null;
+  let dragSearchItem = null;
+  let durationRepairNoticeShown = false;
   let searchTimer = null;
   let searchObserver = null;
   let searchState = {
@@ -443,11 +442,42 @@
   }
 
   async function loadTimeline() {
-    const res = await fetch('/api/timeline');
+    const res = await fetch('/api/timeline?_ts=' + Date.now(), { cache: 'no-store' });
     if (!res.ok) throw new Error(await res.text());
     timeline = await res.json();
+    repairLegacyCappedDurations();
     await loadFonts();
     renderAll();
+  }
+
+  function repairLegacyCappedDurations() {
+    const clips = timeline.clips || [];
+    const library = timeline.library || [];
+    if (!clips.length || !library.length) return;
+
+    const durationByPath = new Map();
+    library.forEach((item) => {
+      const key = String(item.path || '').toLowerCase();
+      const dur = Number(item.duration || 0);
+      if (key && dur > 0) durationByPath.set(key, dur);
+    });
+
+    let changed = 0;
+    clips.forEach((clip) => {
+      const libDuration = durationByPath.get(String(clip.path || '').toLowerCase()) || 0;
+      const clipDuration = Number(clip.duration || 0);
+      const clipStart = Number(clip.start || 0);
+
+      if (clipStart === 0 && clipDuration === 8 && libDuration > 8) {
+        clip.duration = libDuration;
+        changed += 1;
+      }
+    });
+
+    if (changed > 0 && !durationRepairNoticeShown) {
+      setStatus(`Duraciones restauradas en ${changed} clip(s)`, 'ok');
+      durationRepairNoticeShown = true;
+    }
   }
 
   async function loadFonts(search = '') {
@@ -545,12 +575,16 @@
     if ($('topicMinutes')) {
       $('topicMinutes').value = Math.max(1, Math.round(Number(timeline.target_minutes || 8)));
     }
+    if ($('scriptText') && document.activeElement !== $('scriptText')) {
+      $('scriptText').value = String(timeline.script_text || '');
+    }
     renderLibrary();
     renderTimeline();
     renderTracksMeta();
     syncInspector();
     renderOverlayList();
     renderFontPreview();
+    renderTimelineSummary();
   }
 
   function renderSearchResults(items, append = false) {
@@ -562,22 +596,32 @@
     (items || []).forEach((item) => {
       const card = document.createElement('div');
       card.className = 'clip-card';
+      card.draggable = true;
 
       const preview = item.media_type === 'image'
-        ? `<img src="${item.thumb_url || item.preview_url}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;" />`
-        : `<video muted preload="metadata" src="${item.preview_url || ''}"></video>`;
+        ? `<img draggable="false" src="${item.thumb_url || item.preview_url}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;" />`
+        : `<video draggable="false" muted preload="metadata" src="${item.preview_url || ''}"></video>`;
 
       card.innerHTML = `
         ${preview}
         <div class="name">${item.provider} · ${item.media_type}</div>
         <div class="meta">${Number(item.duration || 0).toFixed(1)}s</div>
-        <button class="add-btn">Añadir a biblioteca</button>
+        <button class="add-btn">Añadir al timeline</button>
       `;
 
       card.querySelector('.add-btn').onclick = async (e) => {
         e.stopPropagation();
-        await importSearchItem(item); // add_to_timeline=false ya está correcto
+        await addSearchItemToTimeline(item);
       };
+
+      card.ondragstart = (e) => {
+        dragSearchItem = item;
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'copy';
+          try { e.dataTransfer.setData('application/x-search-item', JSON.stringify(item)); } catch {}
+        }
+      };
+      card.ondragend = () => { dragSearchItem = null; };
 
       root.appendChild(card);
     });
@@ -628,9 +672,18 @@
       max_duration: String(searchState.max_duration),
     });
 
-    const res = await fetch(`/api/media/search?${params.toString()}`);
+    let res;
+    try {
+      res = await fetch(`/api/media/search?${params.toString()}`);
+    } catch (err) {
+      setStatus('Error buscando media: ' + (err?.message || err), 'err');
+      searchState.loading = false;
+      return;
+    }
+
     if (!res.ok) {
-      setStatus('Error buscando media', 'err');
+      const txt = await res.text();
+      setStatus('Error buscando media: ' + txt, 'err');
       searchState.loading = false;
       return;
     }
@@ -638,7 +691,12 @@
     const data = await res.json();
     searchState.has_more = Boolean(data.has_more);
     renderSearchResults(data.items || [], !reset);
-    setStatus('Resultados actualizados', 'ok');
+    const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+    if (warnings.length) {
+      setStatus('Resultados actualizados (warnings: ' + warnings.join(' | ') + ')', 'err');
+    } else {
+      setStatus('Resultados actualizados', 'ok');
+    }
     searchState.loading = false;
   }
 
@@ -669,451 +727,2845 @@
   }
 
   async function importSearchItem(item) {
-    setStatus('Importando media...');
+    // Mantener compatibilidad: ahora también va directo al timeline
+    await addSearchItemToTimeline(item);
+  }
+
+  function renderLibrary() {
+    // Biblioteca eliminada intencionalmente
+  }
+
+  function renderSearchResults(items, append = false) {
+    const root = $('mediaSearchResults');
+    if (!append) {
+      root.innerHTML = '';
+    }
+
+    (items || []).forEach((item) => {
+      const card = document.createElement('div');
+      card.className = 'clip-card';
+      card.draggable = true;
+
+      const preview = item.media_type === 'image'
+        ? `<img draggable="false" src="${item.thumb_url || item.preview_url}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;" />`
+        : `<video draggable="false" muted preload="metadata" src="${item.preview_url || ''}"></video>`;
+
+      card.innerHTML = `
+        ${preview}
+        <div class="name">${item.provider} · ${item.media_type}</div>
+        <div class="meta">${Number(item.duration || 0).toFixed(1)}s</div>
+        <button class="add-btn">Añadir al timeline</button>
+      `;
+
+      card.querySelector('.add-btn').onclick = async (e) => {
+        e.stopPropagation();
+        await addSearchItemToTimeline(item);
+      };
+
+      card.ondragstart = (e) => {
+        dragSearchItem = item;
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'copy';
+          try { e.dataTransfer.setData('application/x-search-item', JSON.stringify(item)); } catch {}
+        }
+      };
+      card.ondragend = () => { dragSearchItem = null; };
+
+      root.appendChild(card);
+    });
+
+    const totalRendered = root.children.length;
+    $('searchInfo').textContent = `${totalRendered} resultados · página ${searchState.page}`;
+    $('btnLoadMore').style.display = searchState.has_more ? 'block' : 'none';
+  }
+
+  async function addSearchItemToTimeline(item, targetClipId = null, insertAfter = false) {
+    setStatus('Importando y añadiendo al timeline...');
     const payload = {
       item,
-      add_to_timeline: false, // antes true
+      add_to_timeline: true,
       image_seconds: 6,
     };
+
     const res = await fetch('/api/media/import', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
+
     if (!res.ok) {
-      setStatus('Error importando media', 'err');
+      const txt = await res.text().catch(() => '');
+      setStatus('Error importando media: ' + (txt || 'unknown'), 'err');
       return;
     }
 
-    await loadTimeline();
-    setStatus('Media añadida a biblioteca', 'ok');
+    const data = await res.json().catch(() => ({}));
+    const clip = data?.clip;
+
+    if (!clip || !clip.path) {
+      setStatus('Error: importación sin clip de timeline', 'err');
+      return;
+    }
+
+    timeline.clips = timeline.clips || [];
+    const newClip = {
+      id: clip.id,
+      name: clip.name,
+      path: clip.path,
+      start: Number(clip.start || 0),
+      duration: Math.max(1, Number(clip.duration || 4)),
+      enabled: Boolean(clip.enabled),
+    };
+
+    if (targetClipId) {
+      const idx = timeline.clips.findIndex(c => c.id === targetClipId);
+      if (idx >= 0) timeline.clips.splice(insertAfter ? idx + 1 : idx, 0, newClip);
+      else timeline.clips.push(newClip);
+    } else {
+      timeline.clips.push(newClip);
+    }
+
+    selectedClipId = newClip.id;
+    selectedClipIds = new Set([newClip.id]);
+    renderAll();
+    setStatus('Clip añadido al timeline', 'ok');
   }
 
   async function generateProjectFromTopic() {
-    try {
-      const topic = String($('topicInput')?.value || '').trim();
-      if (!topic) {
-        setStatus('Introduce una temática', 'err');
-        return;
-      }
-
-      setStatus('Generando guion/voz/subs...');
-      const payload = {
-        topic,
-        minutes: Number($('topicMinutes')?.value || 8),
-        script_provider: 'auto',
-        tts_provider: 'gtts',
-        voice: 'en',
-        speech_rate: '+0%',
-      };
-
-      const res = await fetch('/api/project/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-
-      if (!res.ok) {
-        const txt = await res.text();
-        setStatus('Error generando proyecto: ' + txt, 'err');
-        return;
-      }
-
-      await loadTimeline();
-      // opcional: lanzar búsqueda automática con la temática
-      if ($('mediaSearch') && !$('mediaSearch').value.trim()) {
-        $('mediaSearch').value = topic;
-        await searchMediaRealtime(true);
-      }
-
-      setStatus('Guion + voz + subtítulos listos. Ahora añade clips al timeline.', 'ok');
-    } catch (err) {
-      setStatus('Error: ' + (err?.message || err), 'err');
-    }
+    await postGen('/api/project/generate', 'Generando guion/voz/subs...', 'Guion + voz + subtítulos listos');
   }
 
-  function renderLibrary() {
-    const root = $('mediaBin');
-    root.innerHTML = '';
-
-    const lib = timeline.library || [];
-    $('libraryInfo').textContent = `${lib.length} clips en biblioteca`;
-
-    lib.forEach((item) => {
-      const card = document.createElement('div');
-      card.className = 'clip-card';
-      card.dataset.path = item.path;
-      card.innerHTML = `
-        <video muted preload="metadata" src="${clipUrl(item.path)}"></video>
-        <div class="name">${item.name || item.path.split('\\').pop()}</div>
-        <div class="meta">${Number(item.duration || 0).toFixed(1)}s</div>
-      `;
-      card.onclick = () => {
-        selectedLibraryPath = item.path;
-        [...root.querySelectorAll('.clip-card')].forEach((el) => el.classList.remove('selected'));
-        card.classList.add('selected');
-        $('preview').src = clipUrl(item.path);
-      };
-      card.ondblclick = () => addClipFromLibrary(item.path);
-      root.appendChild(card);
-    });
-  }
-
-  function renderTimeline() {
-    const track = $('trackVideo');
-    track.innerHTML = '';
-    track.ondragover = (e) => e.preventDefault();
-
-    (timeline.clips || []).forEach((clip, idx) => {
-      const isSelected = selectedClipIds.has(clip.id);
-      const seg = document.createElement('div');
-      seg.className = 'seg' + (clip.enabled ? '' : ' disabled') + (isSelected ? ' selected' : '');
-      seg.textContent = `${idx + 1}. ${clip.name || 'clip'} (${Number(clip.duration || 0).toFixed(1)}s)`;
-      seg.draggable = true;
-
-      seg.onclick = (e) => {
-        if (e.ctrlKey || e.metaKey) {
-          if (selectedClipIds.has(clip.id)) selectedClipIds.delete(clip.id);
-          else selectedClipIds.add(clip.id);
-          selectedClipId = clip.id;
-        } else {
-          selectedClipIds = new Set([clip.id]);
-          selectedClipId = clip.id;
-        }
-        $('preview').src = clipUrl(clip.path) + `#t=${Number(clip.start || 0)},${Number(clip.start || 0) + Number(clip.duration || 4)}`;
-        syncInspector();
-        renderTimeline();
-      };
-
-      seg.ondragstart = () => {
-        dragClipId = clip.id;
-      };
-      seg.ondragover = (e) => {
-        e.preventDefault();
-      };
-      seg.ondrop = (e) => {
-        e.preventDefault();
-        if (!dragClipId || dragClipId === clip.id) return;
-        reorderClips(dragClipId, clip.id);
-      };
-      track.appendChild(seg);
-    });
-  }
-
-  function reorderClips(sourceId, targetId) {
-    const clips = timeline.clips || [];
-    const sourceIndex = clips.findIndex(c => c.id === sourceId);
-    const targetIndex = clips.findIndex(c => c.id === targetId);
-    if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return;
-
-    const [moved] = clips.splice(sourceIndex, 1);
-    clips.splice(targetIndex, 0, moved);
-    selectedClipId = moved.id;
-    renderTimeline();
-  }
-
-  function renderTracksMeta() {
-    const a = $('trackAudio');
-    const s = $('trackSubs');
-    a.innerHTML = '';
-    s.innerHTML = '';
-
-    if (timeline.audio && timeline.audio.path) {
-      const el = document.createElement('div');
-      el.className = 'seg';
-      el.textContent = timeline.audio.name || 'voice';
-      a.appendChild(el);
-    }
-
-    if (timeline.subtitles && timeline.subtitles.path) {
-      const el = document.createElement('div');
-      el.className = 'seg';
-      el.textContent = timeline.subtitles.name || 'subtitles';
-      s.appendChild(el);
-    }
-  }
-
-  function getSelectedClip() {
-    return (timeline.clips || []).find(c => c.id === selectedClipId);
-  }
-
-  function syncInspector() {
-    const clip = getSelectedClip();
-    $('clipName').value = clip ? (clip.name || '') : '';
-    $('clipPath').value = clip ? (clip.path || '') : '';
-    $('clipStart').value = clip ? Number(clip.start || 0) : 0;
-    $('clipDuration').value = clip ? Number(clip.duration || 4) : 4;
-
-    timeline.subtitle_style = timeline.subtitle_style || {};
-    $('subFont').value = timeline.subtitle_style.font_family || 'Arial';
-    $('subFontSize').value = Number(timeline.subtitle_style.font_size || 18);
-    timeline.subtitle_style.font_file = timeline.subtitle_style.font_file || getSelectedLocalFontFile();
-    renderFontPreview();
-  }
-
-  function renderFontPreview() {
-    const style = timeline.subtitle_style || {};
-    const font = $('subFont')?.value || style.font_family || 'Arial';
-    const size = Math.max(10, Number($('subFontSize')?.value || style.font_size || 18));
-    const fontFile = getSelectedLocalFontFile();
-    if (fontFile) {
-      const encoded = encodeURIComponent(fontFile.split('\\').pop());
-      const styleId = 'dynamic-font-preview-style';
-      let styleEl = document.getElementById(styleId);
-      if (!styleEl) {
-        styleEl = document.createElement('style');
-        styleEl.id = styleId;
-        document.head.appendChild(styleEl);
-      }
-      styleEl.textContent = `@font-face { font-family: "Preview-${font}"; src: url('/fonts/${encoded}') format('truetype'); }`;
-    }
-
-    const previewFamily = fontFile ? `Preview-${font}` : font;
-    const sample = $('subFontPreview');
-    if (sample) {
-      sample.style.fontFamily = `'${previewFamily}', '${font}', Arial, sans-serif`;
-      sample.style.fontSize = `${size}px`;
-      sample.textContent = 'Esto es una previsualización de subtítulo';
-    }
-
-    const overlayInput = String($('ovText')?.value || '').trim();
-    const overlaySample = $('ovPreview');
-    if (overlaySample) {
-      overlaySample.style.fontFamily = `'${previewFamily}', '${font}', Arial, sans-serif`;
-      overlaySample.textContent = overlayInput || 'Previsualización de texto incrustado';
-    }
-  }
-
-  function renderOverlayList() {
-    const root = $('overlayList');
-    const selected = getSelectedClip();
-    if (!selected) {
-      root.textContent = 'Selecciona un clip para ver/editar textos.';
-      return;
-    }
-
-    const overlays = (timeline.overlays || []).filter(o => o.clip_id === selected.id);
-    if (!overlays.length) {
-      root.textContent = 'Sin textos en este clip.';
-      return;
-    }
-
-    root.innerHTML = overlays
-      .map(o => `• [${Number(o.start).toFixed(1)}-${Number(o.end).toFixed(1)}s] ${o.text}`)
-      .join('<br>');
-  }
-
-  function addClipFromLibrary(path) {
-    const libItem = (timeline.library || []).find(x => x.path === path);
-    if (!libItem) return;
-
-    const id = (crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now() + Math.random());
-    timeline.clips = timeline.clips || [];
-    timeline.clips.push({
-      id,
-      name: libItem.name || libItem.path.split('\\').pop(),
-      path: libItem.path,
-      start: 0,
-      duration: Math.max(1, Math.min(Number(libItem.duration || 4), 8)),
-      enabled: true,
-    });
-    selectedClipId = id;
-    selectedClipIds = new Set([id]);
-    renderAll();
-  }
-
-  function applyInspectorChanges() {
-    const clip = getSelectedClip();
-    if (!clip) {
-      setStatus('Selecciona un clip del timeline', 'err');
-      return;
-    }
-
-    clip.start = Math.max(0, Number($('clipStart').value || 0));
-    clip.duration = Math.max(1, Number($('clipDuration').value || 4));
-    clip.name = String($('clipName').value || clip.name || '').trim() || clip.name;
-    renderAll();
-    setStatus('Cambios del clip aplicados', 'ok');
-  }
-
-  function addOverlayToSelectedClip() {
-    const clip = getSelectedClip();
-    if (!clip) {
-      setStatus('Selecciona un clip para añadir texto', 'err');
-      return;
-    }
-
-    const text = String($('ovText').value || '').trim();
-    if (!text) {
-      setStatus('Escribe un texto para incrustar', 'err');
-      return;
-    }
-
-    const start = Math.max(0, Number($('ovStart').value || 0));
-    const end = Math.max(start + 0.1, Number($('ovEnd').value || (start + 2.5)));
-
-    timeline.overlays = timeline.overlays || [];
-    timeline.overlays.push({
-      clip_id: clip.id,
-      text,
-      start,
-      end,
-    });
-    renderOverlayList();
-    renderFontPreview();
-    setStatus('Texto incrustado añadido al clip', 'ok');
-  }
-
-  function moveSelected(delta) {
-    const clips = timeline.clips || [];
-    const i = clips.findIndex(c => c.id === selectedClipId);
-    if (i < 0) return;
-    const j = i + delta;
-    if (j < 0 || j >= clips.length) return;
-    [clips[i], clips[j]] = [clips[j], clips[i]];
-    renderTimeline();
-  }
-
-  function toggleSelected() {
-    const clip = getSelectedClip();
-    if (!clip) return;
-    clip.enabled = !clip.enabled;
-    renderTimeline();
-  }
-
-  function deleteSelected() {
-    const clips = timeline.clips || [];
-    const i = clips.findIndex(c => c.id === selectedClipId);
-    if (i < 0) return;
-    clips.splice(i, 1);
-    selectedClipIds.delete(selectedClipId);
-    selectedClipId = clips.length ? clips[Math.max(0, i - 1)].id : null;
-    if (selectedClipId) selectedClipIds = new Set([selectedClipId]);
-    renderAll();
-  }
-
-  function deleteSelectedBulk() {
-    if (!selectedClipIds.size) return;
-    timeline.clips = (timeline.clips || []).filter(c => !selectedClipIds.has(c.id));
-    selectedClipId = null;
-    selectedClipIds.clear();
-    renderAll();
-  }
-
-  function clearTimelineClips() {
-    timeline.clips = [];
-    selectedClipId = null;
-    selectedClipIds.clear();
-    renderAll();
-  }
-
-  async function saveTimeline() {
-    setStatus('Guardando...');
-    const payload = {
-      ...timeline,
-      clips: (timeline.clips || []).map(c => ({
-        id: c.id,
-        name: c.name,
-        path: c.path,
-        start: Number(c.start || 0),
-        duration: Number(c.duration || 4),
-        enabled: Boolean(c.enabled),
-      })),
+  function buildGenPayload() {
+    const unifiedQuery = String($('mediaSearch')?.value || '').trim(); // único input
+    return {
+      topic: unifiedQuery,
+      minutes: Number(timeline.target_minutes || 8),
+      script_provider: 'auto',
+      tts_provider: 'gtts',
+      voice: 'en',
+      speech_rate: '+0%',
+      script_text: String($('scriptText')?.value || '').trim(),
     };
+  }
 
-    const res = await fetch('/api/timeline', {
-      method: 'PUT',
+  async function postGen(url, pendingMsg, okMsgPrefix) {
+    const payload = buildGenPayload();
+
+    const needsTopicToGenerateScript = (
+      url === '/api/script/generate' || url === '/api/project/generate'
+    );
+
+    if (needsTopicToGenerateScript && !payload.topic && !payload.script_text) {
+      setStatus('Escribe búsqueda o pega un guion en Script (editable)', 'err');
+      return;
+    }
+
+    setStatus(pendingMsg);
+    const res = await fetch(url, {
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
 
     if (!res.ok) {
-      setStatus('Error al guardar timeline', 'err');
+      const txt = await res.text();
+      setStatus('Error: ' + txt, 'err');
       return;
     }
 
-    setStatus('Timeline guardado', 'ok');
+    await loadTimeline();
+    setStatus(okMsgPrefix, 'ok');
   }
 
-  async function renderFinal() {
-    // el render SI es el montaje final
-    if (!timeline.clips || !timeline.clips.length) {
-      setStatus('Añade clips al timeline antes de renderizar', 'err');
-      return;
+  async function generateScriptOnly() {
+    await postGen('/api/script/generate', 'Generando guion...', 'Guion listo');
+  }
+
+  async function generateAudioOnly() {
+    await postGen('/api/audio/generate', 'Generando audio...', 'Audio listo');
+  }
+
+  async function generateSubtitlesOnly() {
+    await postGen('/api/subtitles/generate', 'Generando subtítulos...', 'Subtítulos listos');
+  }
+
+  function renderLibrary() {
+    // Biblioteca eliminada intencionalmente
+  }
+
+  function renderSearchResults(items, append = false) {
+    const root = $('mediaSearchResults');
+    if (!append) {
+      root.innerHTML = '';
     }
-    if (!timeline.audio?.path || !timeline.subtitles?.path) {
-      setStatus('Primero genera guion+voz+subs', 'err');
+
+    (items || []).forEach((item) => {
+      const card = document.createElement('div');
+      card.className = 'clip-card';
+      card.draggable = true;
+
+      const preview = item.media_type === 'image'
+        ? `<img draggable="false" src="${item.thumb_url || item.preview_url}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;" />`
+        : `<video draggable="false" muted preload="metadata" src="${item.preview_url || ''}"></video>`;
+
+      card.innerHTML = `
+        ${preview}
+        <div class="name">${item.provider} · ${item.media_type}</div>
+        <div class="meta">${Number(item.duration || 0).toFixed(1)}s</div>
+        <button class="add-btn">Añadir al timeline</button>
+      `;
+
+      card.querySelector('.add-btn').onclick = async (e) => {
+        e.stopPropagation();
+        await addSearchItemToTimeline(item);
+      };
+
+      card.ondragstart = (e) => {
+        dragSearchItem = item;
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'copy';
+          try { e.dataTransfer.setData('application/x-search-item', JSON.stringify(item)); } catch {}
+        }
+      };
+      card.ondragend = () => { dragSearchItem = null; };
+
+      root.appendChild(card);
+    });
+
+    const totalRendered = root.children.length;
+    $('searchInfo').textContent = `${totalRendered} resultados · página ${searchState.page}`;
+    $('btnLoadMore').style.display = searchState.has_more ? 'block' : 'none';
+  }
+
+  async function addSearchItemToTimeline(item, targetClipId = null, insertAfter = false) {
+    setStatus('Importando y añadiendo al timeline...');
+    const payload = {
+      item,
+      add_to_timeline: true,
+      image_seconds: 6,
+    };
+
+    const res = await fetch('/api/media/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      setStatus('Error importando media: ' + (txt || 'unknown'), 'err');
       return;
     }
 
-    await saveTimeline();
-    setStatus('Renderizando...');
-    const res = await fetch('/api/render', { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    const clip = data?.clip;
+
+    if (!clip || !clip.path) {
+      setStatus('Error: importación sin clip de timeline', 'err');
+      return;
+    }
+
+    timeline.clips = timeline.clips || [];
+    const newClip = {
+      id: clip.id,
+      name: clip.name,
+      path: clip.path,
+      start: Number(clip.start || 0),
+      duration: Math.max(1, Number(clip.duration || 4)),
+      enabled: Boolean(clip.enabled),
+    };
+
+    if (targetClipId) {
+      const idx = timeline.clips.findIndex(c => c.id === targetClipId);
+      if (idx >= 0) timeline.clips.splice(insertAfter ? idx + 1 : idx, 0, newClip);
+      else timeline.clips.push(newClip);
+    } else {
+      timeline.clips.push(newClip);
+    }
+
+    selectedClipId = newClip.id;
+    selectedClipIds = new Set([newClip.id]);
+    renderAll();
+    setStatus('Clip añadido al timeline', 'ok');
+  }
+
+  async function importSearchItem(item) {
+    // Mantener compatibilidad: ahora también va directo al timeline
+    await addSearchItemToTimeline(item);
+  }
+
+  function renderAll() {
+    if ($('topicInput') && !($('topicInput').value || '').trim()) {
+      $('topicInput').value = timeline.topic || '';
+    }
+    if ($('topicMinutes')) {
+      $('topicMinutes').value = Math.max(1, Math.round(Number(timeline.target_minutes || 8)));
+    }
+    if ($('scriptText') && document.activeElement !== $('scriptText')) {
+      $('scriptText').value = String(timeline.script_text || '');
+    }
+    renderLibrary();
+    renderTimeline();
+    renderTracksMeta();
+    syncInspector();
+    renderOverlayList();
+    renderFontPreview();
+    renderTimelineSummary();
+  }
+
+  function renderSearchResults(items, append = false) {
+    const root = $('mediaSearchResults');
+    if (!append) {
+      root.innerHTML = '';
+    }
+
+    (items || []).forEach((item) => {
+      const card = document.createElement('div');
+      card.className = 'clip-card';
+      card.draggable = true;
+
+      const preview = item.media_type === 'image'
+        ? `<img draggable="false" src="${item.thumb_url || item.preview_url}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;" />`
+        : `<video draggable="false" muted preload="metadata" src="${item.preview_url || ''}"></video>`;
+
+      card.innerHTML = `
+        ${preview}
+        <div class="name">${item.provider} · ${item.media_type}</div>
+        <div class="meta">${Number(item.duration || 0).toFixed(1)}s</div>
+        <button class="add-btn">Añadir al timeline</button>
+      `;
+
+      card.querySelector('.add-btn').onclick = async (e) => {
+        e.stopPropagation();
+        await addSearchItemToTimeline(item);
+      };
+
+      card.ondragstart = (e) => {
+        dragSearchItem = item;
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'copy';
+          try { e.dataTransfer.setData('application/x-search-item', JSON.stringify(item)); } catch {}
+        }
+      };
+      card.ondragend = () => { dragSearchItem = null; };
+
+      root.appendChild(card);
+    });
+
+    const totalRendered = root.children.length;
+    $('searchInfo').textContent = `${totalRendered} resultados · página ${searchState.page}`;
+    $('btnLoadMore').style.display = searchState.has_more ? 'block' : 'none';
+  }
+
+  async function addSearchItemToTimeline(item, targetClipId = null, insertAfter = false) {
+    setStatus('Importando y añadiendo al timeline...');
+    const payload = {
+      item,
+      add_to_timeline: true,
+      image_seconds: 6,
+    };
+
+    const res = await fetch('/api/media/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      setStatus('Error importando media: ' + (txt || 'unknown'), 'err');
+      return;
+    }
+
+    const data = await res.json().catch(() => ({}));
+    const clip = data?.clip;
+
+    if (!clip || !clip.path) {
+      setStatus('Error: importación sin clip de timeline', 'err');
+      return;
+    }
+
+    timeline.clips = timeline.clips || [];
+    const newClip = {
+      id: clip.id,
+      name: clip.name,
+      path: clip.path,
+      start: Number(clip.start || 0),
+      duration: Math.max(1, Number(clip.duration || 4)),
+      enabled: Boolean(clip.enabled),
+    };
+
+    if (targetClipId) {
+      const idx = timeline.clips.findIndex(c => c.id === targetClipId);
+      if (idx >= 0) timeline.clips.splice(insertAfter ? idx + 1 : idx, 0, newClip);
+      else timeline.clips.push(newClip);
+    } else {
+      timeline.clips.push(newClip);
+    }
+
+    selectedClipId = newClip.id;
+    selectedClipIds = new Set([newClip.id]);
+    renderAll();
+    setStatus('Clip añadido al timeline', 'ok');
+  }
+
+  async function generateProjectFromTopic() {
+    await postGen('/api/project/generate', 'Generando guion/voz/subs...', 'Guion + voz + subtítulos listos');
+  }
+
+  function buildGenPayload() {
+    const unifiedQuery = String($('mediaSearch')?.value || '').trim(); // único input
+    return {
+      topic: unifiedQuery,
+      minutes: Number(timeline.target_minutes || 8),
+      script_provider: 'auto',
+      tts_provider: 'gtts',
+      voice: 'en',
+      speech_rate: '+0%',
+      script_text: String($('scriptText')?.value || '').trim(),
+    };
+  }
+
+  async function postGen(url, pendingMsg, okMsgPrefix) {
+    const payload = buildGenPayload();
+
+    const needsTopicToGenerateScript = (
+      url === '/api/script/generate' || url === '/api/project/generate'
+    );
+
+    if (needsTopicToGenerateScript && !payload.topic && !payload.script_text) {
+      setStatus('Escribe búsqueda o pega un guion en Script (editable)', 'err');
+      return;
+    }
+
+    setStatus(pendingMsg);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
     if (!res.ok) {
       const txt = await res.text();
-      setStatus('Error de render: ' + txt, 'err');
+      setStatus('Error: ' + txt, 'err');
       return;
     }
-    const data = await res.json();
-    setStatus('Render final listo: ' + (data.out_path || ''), 'ok');
+
+    await loadTimeline();
+    setStatus(okMsgPrefix, 'ok');
   }
 
-  function on(id, event, handler) {
-    const el = $(id);
-    if (el) el.addEventListener(event, handler);
+  async function generateScriptOnly() {
+    await postGen('/api/script/generate', 'Generando guion...', 'Guion listo');
   }
 
-  $('btnAddFromSelection').onclick = () => {
-    if (!selectedLibraryPath && timeline.library?.length) {
-      selectedLibraryPath = timeline.library[0].path;
+  async function generateAudioOnly() {
+    await postGen('/api/audio/generate', 'Generando audio...', 'Audio listo');
+  }
+
+  async function generateSubtitlesOnly() {
+    await postGen('/api/subtitles/generate', 'Generando subtítulos...', 'Subtítulos listos');
+  }
+
+  function renderLibrary() {
+    // Biblioteca eliminada intencionalmente
+  }
+
+  function renderSearchResults(items, append = false) {
+    const root = $('mediaSearchResults');
+    if (!append) {
+      root.innerHTML = '';
     }
-    if (selectedLibraryPath) {
-      addClipFromLibrary(selectedLibraryPath);
-      setStatus('Clip añadido al timeline', 'ok');
+
+    (items || []).forEach((item) => {
+      const card = document.createElement('div');
+      card.className = 'clip-card';
+      card.draggable = true;
+
+      const preview = item.media_type === 'image'
+        ? `<img draggable="false" src="${item.thumb_url || item.preview_url}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;" />`
+        : `<video draggable="false" muted preload="metadata" src="${item.preview_url || ''}"></video>`;
+
+      card.innerHTML = `
+        ${preview}
+        <div class="name">${item.provider} · ${item.media_type}</div>
+        <div class="meta">${Number(item.duration || 0).toFixed(1)}s</div>
+        <button class="add-btn">Añadir al timeline</button>
+      `;
+
+      card.querySelector('.add-btn').onclick = async (e) => {
+        e.stopPropagation();
+        await addSearchItemToTimeline(item);
+      };
+
+      card.ondragstart = (e) => {
+        dragSearchItem = item;
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'copy';
+          try { e.dataTransfer.setData('application/x-search-item', JSON.stringify(item)); } catch {}
+        }
+      };
+      card.ondragend = () => { dragSearchItem = null; };
+
+      root.appendChild(card);
+    });
+
+    const totalRendered = root.children.length;
+    $('searchInfo').textContent = `${totalRendered} resultados · página ${searchState.page}`;
+    $('btnLoadMore').style.display = searchState.has_more ? 'block' : 'none';
+  }
+
+  async function addSearchItemToTimeline(item, targetClipId = null, insertAfter = false) {
+    setStatus('Importando y añadiendo al timeline...');
+    const payload = {
+      item,
+      add_to_timeline: true,
+      image_seconds: 6,
+    };
+
+    const res = await fetch('/api/media/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      setStatus('Error importando media: ' + (txt || 'unknown'), 'err');
+      return;
+    }
+
+    const data = await res.json().catch(() => ({}));
+    const clip = data?.clip;
+
+    if (!clip || !clip.path) {
+      setStatus('Error: importación sin clip de timeline', 'err');
+      return;
+    }
+
+    timeline.clips = timeline.clips || [];
+    const newClip = {
+      id: clip.id,
+      name: clip.name,
+      path: clip.path,
+      start: Number(clip.start || 0),
+      duration: Math.max(1, Number(clip.duration || 4)),
+      enabled: Boolean(clip.enabled),
+    };
+
+    if (targetClipId) {
+      const idx = timeline.clips.findIndex(c => c.id === targetClipId);
+      if (idx >= 0) timeline.clips.splice(insertAfter ? idx + 1 : idx, 0, newClip);
+      else timeline.clips.push(newClip);
     } else {
-      setStatus('Selecciona un clip de la biblioteca', 'err');
+      timeline.clips.push(newClip);
     }
-  };
-  $('btnMoveLeft').onclick = () => moveSelected(-1);
-  $('btnMoveRight').onclick = () => moveSelected(1);
-  $('btnToggle').onclick = toggleSelected;
-  $('btnDelete').onclick = deleteSelected;
-  $('btnDeleteSelected').onclick = deleteSelectedBulk;
-  $('btnClearTimeline').onclick = clearTimelineClips;
-  $('btnApply').onclick = applyInspectorChanges;
-  $('btnAddOverlay').onclick = addOverlayToSelectedClip;
-  $('btnSave').onclick = saveTimeline;
-  $('btnRender').onclick = renderFinal;
-  $('btnInstallFont').onclick = installSelectedCatalogFont;
-  $('btnFontSearch').onclick = () => loadFonts($('fontSearch').value || '');
-  $('btnGenerateProject').onclick = generateProjectFromTopic;
-  $('btnLoadMore').onclick = loadMoreSearchResults;
 
-  on('btnGenerateProject', 'click', generateProjectFromTopic);
-  on('btnLoadMore', 'click', loadMoreSearchResults);
-  on('mediaSearch', 'input', () => {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => searchMediaRealtime(true), 350);
-  });
-  on('mediaType', 'change', () => searchMediaRealtime(true));
-  on('mediaProviders', 'change', () => searchMediaRealtime(true));
-  on('mediaOrientation', 'change', () => searchMediaRealtime(true));
-  on('mediaPerPage', 'change', () => searchMediaRealtime(true));
-  on('mediaMinDuration', 'change', () => searchMediaRealtime(true));
-  on('mediaMaxDuration', 'change', () => searchMediaRealtime(true));
+    selectedClipId = newClip.id;
+    selectedClipIds = new Set([newClip.id]);
+    renderAll();
+    setStatus('Clip añadido al timeline', 'ok');
+  }
 
-  $('subFont').addEventListener('input', renderFontPreview);
-  $('subFontSize').addEventListener('input', renderFontPreview);
-  $('ovText').addEventListener('input', renderFontPreview);
+  async function importSearchItem(item) {
+    // Mantener compatibilidad: ahora también va directo al timeline
+    await addSearchItemToTimeline(item);
+  }
 
-  (async () => {
-    try {
-      await loadTimeline();
-    } catch (err) {
-      setStatus('Error al cargar: ' + err.message, 'err');
+  function renderAll() {
+    if ($('topicInput') && !($('topicInput').value || '').trim()) {
+      $('topicInput').value = timeline.topic || '';
     }
-  })();
-  setupSearchInfiniteScroll();
-</script>
-</body>
-</html>
+    if ($('topicMinutes')) {
+      $('topicMinutes').value = Math.max(1, Math.round(Number(timeline.target_minutes || 8)));
+    }
+    if ($('scriptText') && document.activeElement !== $('scriptText')) {
+      $('scriptText').value = String(timeline.script_text || '');
+    }
+    renderLibrary();
+    renderTimeline();
+    renderTracksMeta();
+    syncInspector();
+    renderOverlayList();
+    renderFontPreview();
+    renderTimelineSummary();
+  }
+
+  function renderSearchResults(items, append = false) {
+    const root = $('mediaSearchResults');
+    if (!append) {
+      root.innerHTML = '';
+    }
+
+    (items || []).forEach((item) => {
+      const card = document.createElement('div');
+      card.className = 'clip-card';
+      card.draggable = true;
+
+      const preview = item.media_type === 'image'
+        ? `<img draggable="false" src="${item.thumb_url || item.preview_url}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;" />`
+        : `<video draggable="false" muted preload="metadata" src="${item.preview_url || ''}"></video>`;
+
+      card.innerHTML = `
+        ${preview}
+        <div class="name">${item.provider} · ${item.media_type}</div>
+        <div class="meta">${Number(item.duration || 0).toFixed(1)}s</div>
+        <button class="add-btn">Añadir al timeline</button>
+      `;
+
+      card.querySelector('.add-btn').onclick = async (e) => {
+        e.stopPropagation();
+        await addSearchItemToTimeline(item);
+      };
+
+      card.ondragstart = (e) => {
+        dragSearchItem = item;
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'copy';
+          try { e.dataTransfer.setData('application/x-search-item', JSON.stringify(item)); } catch {}
+        }
+      };
+      card.ondragend = () => { dragSearchItem = null; };
+
+      root.appendChild(card);
+    });
+
+    const totalRendered = root.children.length;
+    $('searchInfo').textContent = `${totalRendered} resultados · página ${searchState.page}`;
+    $('btnLoadMore').style.display = searchState.has_more ? 'block' : 'none';
+  }
+
+  async function addSearchItemToTimeline(item, targetClipId = null, insertAfter = false) {
+    setStatus('Importando y añadiendo al timeline...');
+    const payload = {
+      item,
+      add_to_timeline: true,
+      image_seconds: 6,
+    };
+
+    const res = await fetch('/api/media/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      setStatus('Error importando media: ' + (txt || 'unknown'), 'err');
+      return;
+    }
+
+    const data = await res.json().catch(() => ({}));
+    const clip = data?.clip;
+
+    if (!clip || !clip.path) {
+      setStatus('Error: importación sin clip de timeline', 'err');
+      return;
+    }
+
+    timeline.clips = timeline.clips || [];
+    const newClip = {
+      id: clip.id,
+      name: clip.name,
+      path: clip.path,
+      start: Number(clip.start || 0),
+      duration: Math.max(1, Number(clip.duration || 4)),
+      enabled: Boolean(clip.enabled),
+    };
+
+    if (targetClipId) {
+      const idx = timeline.clips.findIndex(c => c.id === targetClipId);
+      if (idx >= 0) timeline.clips.splice(insertAfter ? idx + 1 : idx, 0, newClip);
+      else timeline.clips.push(newClip);
+    } else {
+      timeline.clips.push(newClip);
+    }
+
+    selectedClipId = newClip.id;
+    selectedClipIds = new Set([newClip.id]);
+    renderAll();
+    setStatus('Clip añadido al timeline', 'ok');
+  }
+
+  async function generateProjectFromTopic() {
+    await postGen('/api/project/generate', 'Generando guion/voz/subs...', 'Guion + voz + subtítulos listos');
+  }
+
+  function buildGenPayload() {
+    const unifiedQuery = String($('mediaSearch')?.value || '').trim(); // único input
+    return {
+      topic: unifiedQuery,
+      minutes: Number(timeline.target_minutes || 8),
+      script_provider: 'auto',
+      tts_provider: 'gtts',
+      voice: 'en',
+      speech_rate: '+0%',
+      script_text: String($('scriptText')?.value || '').trim(),
+    };
+  }
+
+  async function postGen(url, pendingMsg, okMsgPrefix) {
+    const payload = buildGenPayload();
+
+    const needsTopicToGenerateScript = (
+      url === '/api/script/generate' || url === '/api/project/generate'
+    );
+
+    if (needsTopicToGenerateScript && !payload.topic && !payload.script_text) {
+      setStatus('Escribe búsqueda o pega un guion en Script (editable)', 'err');
+      return;
+    }
+
+    setStatus(pendingMsg);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text();
+      setStatus('Error: ' + txt, 'err');
+      return;
+    }
+
+    await loadTimeline();
+    setStatus(okMsgPrefix, 'ok');
+  }
+
+  async function generateScriptOnly() {
+    await postGen('/api/script/generate', 'Generando guion...', 'Guion listo');
+  }
+
+  async function generateAudioOnly() {
+    await postGen('/api/audio/generate', 'Generando audio...', 'Audio listo');
+  }
+
+  async function generateSubtitlesOnly() {
+    await postGen('/api/subtitles/generate', 'Generando subtítulos...', 'Subtítulos listos');
+  }
+
+  function renderLibrary() {
+    // Biblioteca eliminada intencionalmente
+  }
+
+  function renderSearchResults(items, append = false) {
+    const root = $('mediaSearchResults');
+    if (!append) {
+      root.innerHTML = '';
+    }
+
+    (items || []).forEach((item) => {
+      const card = document.createElement('div');
+      card.className = 'clip-card';
+      card.draggable = true;
+
+      const preview = item.media_type === 'image'
+        ? `<img draggable="false" src="${item.thumb_url || item.preview_url}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;" />`
+        : `<video draggable="false" muted preload="metadata" src="${item.preview_url || ''}"></video>`;
+
+      card.innerHTML = `
+        ${preview}
+        <div class="name">${item.provider} · ${item.media_type}</div>
+        <div class="meta">${Number(item.duration || 0).toFixed(1)}s</div>
+        <button class="add-btn">Añadir al timeline</button>
+      `;
+
+      card.querySelector('.add-btn').onclick = async (e) => {
+        e.stopPropagation();
+        await addSearchItemToTimeline(item);
+      };
+
+      card.ondragstart = (e) => {
+        dragSearchItem = item;
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'copy';
+          try { e.dataTransfer.setData('application/x-search-item', JSON.stringify(item)); } catch {}
+        }
+      };
+      card.ondragend = () => { dragSearchItem = null; };
+
+      root.appendChild(card);
+    });
+
+    const totalRendered = root.children.length;
+    $('searchInfo').textContent = `${totalRendered} resultados · página ${searchState.page}`;
+    $('btnLoadMore').style.display = searchState.has_more ? 'block' : 'none';
+  }
+
+  async function addSearchItemToTimeline(item, targetClipId = null, insertAfter = false) {
+    setStatus('Importando y añadiendo al timeline...');
+    const payload = {
+      item,
+      add_to_timeline: true,
+      image_seconds: 6,
+    };
+
+    const res = await fetch('/api/media/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      setStatus('Error importando media: ' + (txt || 'unknown'), 'err');
+      return;
+    }
+
+    const data = await res.json().catch(() => ({}));
+    const clip = data?.clip;
+
+    if (!clip || !clip.path) {
+      setStatus('Error: importación sin clip de timeline', 'err');
+      return;
+    }
+
+    timeline.clips = timeline.clips || [];
+    const newClip = {
+      id: clip.id,
+      name: clip.name,
+      path: clip.path,
+      start: Number(clip.start || 0),
+      duration: Math.max(1, Number(clip.duration || 4)),
+      enabled: Boolean(clip.enabled),
+    };
+
+    if (targetClipId) {
+      const idx = timeline.clips.findIndex(c => c.id === targetClipId);
+      if (idx >= 0) timeline.clips.splice(insertAfter ? idx + 1 : idx, 0, newClip);
+      else timeline.clips.push(newClip);
+    } else {
+      timeline.clips.push(newClip);
+    }
+
+    selectedClipId = newClip.id;
+    selectedClipIds = new Set([newClip.id]);
+    renderAll();
+    setStatus('Clip añadido al timeline', 'ok');
+  }
+
+  async function importSearchItem(item) {
+    // Mantener compatibilidad: ahora también va directo al timeline
+    await addSearchItemToTimeline(item);
+  }
+
+  function renderAll() {
+    if ($('topicInput') && !($('topicInput').value || '').trim()) {
+      $('topicInput').value = timeline.topic || '';
+    }
+    if ($('topicMinutes')) {
+      $('topicMinutes').value = Math.max(1, Math.round(Number(timeline.target_minutes || 8)));
+    }
+    if ($('scriptText') && document.activeElement !== $('scriptText')) {
+      $('scriptText').value = String(timeline.script_text || '');
+    }
+    renderLibrary();
+    renderTimeline();
+    renderTracksMeta();
+    syncInspector();
+    renderOverlayList();
+    renderFontPreview();
+    renderTimelineSummary();
+  }
+
+  function renderSearchResults(items, append = false) {
+    const root = $('mediaSearchResults');
+    if (!append) {
+      root.innerHTML = '';
+    }
+
+    (items || []).forEach((item) => {
+      const card = document.createElement('div');
+      card.className = 'clip-card';
+      card.draggable = true;
+
+      const preview = item.media_type === 'image'
+        ? `<img draggable="false" src="${item.thumb_url || item.preview_url}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;" />`
+        : `<video draggable="false" muted preload="metadata" src="${item.preview_url || ''}"></video>`;
+
+      card.innerHTML = `
+        ${preview}
+        <div class="name">${item.provider} · ${item.media_type}</div>
+        <div class="meta">${Number(item.duration || 0).toFixed(1)}s</div>
+        <button class="add-btn">Añadir al timeline</button>
+      `;
+
+      card.querySelector('.add-btn').onclick = async (e) => {
+        e.stopPropagation();
+        await addSearchItemToTimeline(item);
+      };
+
+      card.ondragstart = (e) => {
+        dragSearchItem = item;
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'copy';
+          try { e.dataTransfer.setData('application/x-search-item', JSON.stringify(item)); } catch {}
+        }
+      };
+      card.ondragend = () => { dragSearchItem = null; };
+
+      root.appendChild(card);
+    });
+
+    const totalRendered = root.children.length;
+    $('searchInfo').textContent = `${totalRendered} resultados · página ${searchState.page}`;
+    $('btnLoadMore').style.display = searchState.has_more ? 'block' : 'none';
+  }
+
+  async function addSearchItemToTimeline(item, targetClipId = null, insertAfter = false) {
+    setStatus('Importando y añadiendo al timeline...');
+    const payload = {
+      item,
+      add_to_timeline: true,
+      image_seconds: 6,
+    };
+
+    const res = await fetch('/api/media/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      setStatus('Error importando media: ' + (txt || 'unknown'), 'err');
+      return;
+    }
+
+    const data = await res.json().catch(() => ({}));
+    const clip = data?.clip;
+
+    if (!clip || !clip.path) {
+      setStatus('Error: importación sin clip de timeline', 'err');
+      return;
+    }
+
+    timeline.clips = timeline.clips || [];
+    const newClip = {
+      id: clip.id,
+      name: clip.name,
+      path: clip.path,
+      start: Number(clip.start || 0),
+      duration: Math.max(1, Number(clip.duration || 4)),
+      enabled: Boolean(clip.enabled),
+    };
+
+    if (targetClipId) {
+      const idx = timeline.clips.findIndex(c => c.id === targetClipId);
+      if (idx >= 0) timeline.clips.splice(insertAfter ? idx + 1 : idx, 0, newClip);
+      else timeline.clips.push(newClip);
+    } else {
+      timeline.clips.push(newClip);
+    }
+
+    selectedClipId = newClip.id;
+    selectedClipIds = new Set([newClip.id]);
+    renderAll();
+    setStatus('Clip añadido al timeline', 'ok');
+  }
+
+  async function generateProjectFromTopic() {
+    await postGen('/api/project/generate', 'Generando guion/voz/subs...', 'Guion + voz + subtítulos listos');
+  }
+
+  function buildGenPayload() {
+    const unifiedQuery = String($('mediaSearch')?.value || '').trim(); // único input
+    return {
+      topic: unifiedQuery,
+      minutes: Number(timeline.target_minutes || 8),
+      script_provider: 'auto',
+      tts_provider: 'gtts',
+      voice: 'en',
+      speech_rate: '+0%',
+      script_text: String($('scriptText')?.value || '').trim(),
+    };
+  }
+
+  async function postGen(url, pendingMsg, okMsgPrefix) {
+    const payload = buildGenPayload();
+
+    const needsTopicToGenerateScript = (
+      url === '/api/script/generate' || url === '/api/project/generate'
+    );
+
+    if (needsTopicToGenerateScript && !payload.topic && !payload.script_text) {
+      setStatus('Escribe búsqueda o pega un guion en Script (editable)', 'err');
+      return;
+    }
+
+    setStatus(pendingMsg);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text();
+      setStatus('Error: ' + txt, 'err');
+      return;
+    }
+
+    await loadTimeline();
+    setStatus(okMsgPrefix, 'ok');
+  }
+
+  async function generateScriptOnly() {
+    await postGen('/api/script/generate', 'Generando guion...', 'Guion listo');
+  }
+
+  async function generateAudioOnly() {
+    await postGen('/api/audio/generate', 'Generando audio...', 'Audio listo');
+  }
+
+  async function generateSubtitlesOnly() {
+    await postGen('/api/subtitles/generate', 'Generando subtítulos...', 'Subtítulos listos');
+  }
+
+  function renderLibrary() {
+    // Biblioteca eliminada intencionalmente
+  }
+
+  function renderSearchResults(items, append = false) {
+    const root = $('mediaSearchResults');
+    if (!append) {
+      root.innerHTML = '';
+    }
+
+    (items || []).forEach((item) => {
+      const card = document.createElement('div');
+      card.className = 'clip-card';
+      card.draggable = true;
+
+      const preview = item.media_type === 'image'
+        ? `<img draggable="false" src="${item.thumb_url || item.preview_url}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;" />`
+        : `<video draggable="false" muted preload="metadata" src="${item.preview_url || ''}"></video>`;
+
+      card.innerHTML = `
+        ${preview}
+        <div class="name">${item.provider} · ${item.media_type}</div>
+        <div class="meta">${Number(item.duration || 0).toFixed(1)}s</div>
+        <button class="add-btn">Añadir al timeline</button>
+      `;
+
+      card.querySelector('.add-btn').onclick = async (e) => {
+        e.stopPropagation();
+        await addSearchItemToTimeline(item);
+      };
+
+      card.ondragstart = (e) => {
+        dragSearchItem = item;
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'copy';
+          try { e.dataTransfer.setData('application/x-search-item', JSON.stringify(item)); } catch {}
+        }
+      };
+      card.ondragend = () => { dragSearchItem = null; };
+
+      root.appendChild(card);
+    });
+
+    const totalRendered = root.children.length;
+    $('searchInfo').textContent = `${totalRendered} resultados · página ${searchState.page}`;
+    $('btnLoadMore').style.display = searchState.has_more ? 'block' : 'none';
+  }
+
+  async function addSearchItemToTimeline(item, targetClipId = null, insertAfter = false) {
+    setStatus('Importando y añadiendo al timeline...');
+    const payload = {
+      item,
+      add_to_timeline: true,
+      image_seconds: 6,
+    };
+
+    const res = await fetch('/api/media/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      setStatus('Error importando media: ' + (txt || 'unknown'), 'err');
+      return;
+    }
+
+    const data = await res.json().catch(() => ({}));
+    const clip = data?.clip;
+
+    if (!clip || !clip.path) {
+      setStatus('Error: importación sin clip de timeline', 'err');
+      return;
+    }
+
+    timeline.clips = timeline.clips || [];
+    const newClip = {
+      id: clip.id,
+      name: clip.name,
+      path: clip.path,
+      start: Number(clip.start || 0),
+      duration: Math.max(1, Number(clip.duration || 4)),
+      enabled: Boolean(clip.enabled),
+    };
+
+    if (targetClipId) {
+      const idx = timeline.clips.findIndex(c => c.id === targetClipId);
+      if (idx >= 0) timeline.clips.splice(insertAfter ? idx + 1 : idx, 0, newClip);
+      else timeline.clips.push(newClip);
+    } else {
+      timeline.clips.push(newClip);
+    }
+
+    selectedClipId = newClip.id;
+    selectedClipIds = new Set([newClip.id]);
+    renderAll();
+    setStatus('Clip añadido al timeline', 'ok');
+  }
+
+  async function importSearchItem(item) {
+    // Mantener compatibilidad: ahora también va directo al timeline
+    await addSearchItemToTimeline(item);
+  }
+
+  function renderAll() {
+    if ($('topicInput') && !($('topicInput').value || '').trim()) {
+      $('topicInput').value = timeline.topic || '';
+    }
+    if ($('topicMinutes')) {
+      $('topicMinutes').value = Math.max(1, Math.round(Number(timeline.target_minutes || 8)));
+    }
+    if ($('scriptText') && document.activeElement !== $('scriptText')) {
+      $('scriptText').value = String(timeline.script_text || '');
+    }
+    renderLibrary();
+    renderTimeline();
+    renderTracksMeta();
+    syncInspector();
+    renderOverlayList();
+    renderFontPreview();
+    renderTimelineSummary();
+  }
+
+  function renderSearchResults(items, append = false) {
+    const root = $('mediaSearchResults');
+    if (!append) {
+      root.innerHTML = '';
+    }
+
+    (items || []).forEach((item) => {
+      const card = document.createElement('div');
+      card.className = 'clip-card';
+      card.draggable = true;
+
+      const preview = item.media_type === 'image'
+        ? `<img draggable="false" src="${item.thumb_url || item.preview_url}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;" />`
+        : `<video draggable="false" muted preload="metadata" src="${item.preview_url || ''}"></video>`;
+
+      card.innerHTML = `
+        ${preview}
+        <div class="name">${item.provider} · ${item.media_type}</div>
+        <div class="meta">${Number(item.duration || 0).toFixed(1)}s</div>
+        <button class="add-btn">Añadir al timeline</button>
+      `;
+
+      card.querySelector('.add-btn').onclick = async (e) => {
+        e.stopPropagation();
+        await addSearchItemToTimeline(item);
+      };
+
+      card.ondragstart = (e) => {
+        dragSearchItem = item;
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'copy';
+          try { e.dataTransfer.setData('application/x-search-item', JSON.stringify(item)); } catch {}
+        }
+      };
+      card.ondragend = () => { dragSearchItem = null; };
+
+      root.appendChild(card);
+    });
+
+    const totalRendered = root.children.length;
+    $('searchInfo').textContent = `${totalRendered} resultados · página ${searchState.page}`;
+    $('btnLoadMore').style.display = searchState.has_more ? 'block' : 'none';
+  }
+
+  async function addSearchItemToTimeline(item, targetClipId = null, insertAfter = false) {
+    setStatus('Importando y añadiendo al timeline...');
+    const payload = {
+      item,
+      add_to_timeline: true,
+      image_seconds: 6,
+    };
+
+    const res = await fetch('/api/media/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      setStatus('Error importando media: ' + (txt || 'unknown'), 'err');
+      return;
+    }
+
+    const data = await res.json().catch(() => ({}));
+    const clip = data?.clip;
+
+    if (!clip || !clip.path) {
+      setStatus('Error: importación sin clip de timeline', 'err');
+      return;
+    }
+
+    timeline.clips = timeline.clips || [];
+    const newClip = {
+      id: clip.id,
+      name: clip.name,
+      path: clip.path,
+      start: Number(clip.start || 0),
+      duration: Math.max(1, Number(clip.duration || 4)),
+      enabled: Boolean(clip.enabled),
+    };
+
+    if (targetClipId) {
+      const idx = timeline.clips.findIndex(c => c.id === targetClipId);
+      if (idx >= 0) timeline.clips.splice(insertAfter ? idx + 1 : idx, 0, newClip);
+      else timeline.clips.push(newClip);
+    } else {
+      timeline.clips.push(newClip);
+    }
+
+    selectedClipId = newClip.id;
+    selectedClipIds = new Set([newClip.id]);
+    renderAll();
+    setStatus('Clip añadido al timeline', 'ok');
+  }
+
+  async function generateProjectFromTopic() {
+    await postGen('/api/project/generate', 'Generando guion/voz/subs...', 'Guion + voz + subtítulos listos');
+  }
+
+  function buildGenPayload() {
+    const unifiedQuery = String($('mediaSearch')?.value || '').trim(); // único input
+    return {
+      topic: unifiedQuery,
+      minutes: Number(timeline.target_minutes || 8),
+      script_provider: 'auto',
+      tts_provider: 'gtts',
+      voice: 'en',
+      speech_rate: '+0%',
+      script_text: String($('scriptText')?.value || '').trim(),
+    };
+  }
+
+  async function postGen(url, pendingMsg, okMsgPrefix) {
+    const payload = buildGenPayload();
+
+    const needsTopicToGenerateScript = (
+      url === '/api/script/generate' || url === '/api/project/generate'
+    );
+
+    if (needsTopicToGenerateScript && !payload.topic && !payload.script_text) {
+      setStatus('Escribe búsqueda o pega un guion en Script (editable)', 'err');
+      return;
+    }
+
+    setStatus(pendingMsg);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text();
+      setStatus('Error: ' + txt, 'err');
+      return;
+    }
+
+    await loadTimeline();
+    setStatus(okMsgPrefix, 'ok');
+  }
+
+  async function generateScriptOnly() {
+    await postGen('/api/script/generate', 'Generando guion...', 'Guion listo');
+  }
+
+  async function generateAudioOnly() {
+    await postGen('/api/audio/generate', 'Generando audio...', 'Audio listo');
+  }
+
+  async function generateSubtitlesOnly() {
+    await postGen('/api/subtitles/generate', 'Generando subtítulos...', 'Subtítulos listos');
+  }
+
+  function renderLibrary() {
+    // Biblioteca eliminada intencionalmente
+  }
+
+  function renderSearchResults(items, append = false) {
+    const root = $('mediaSearchResults');
+    if (!append) {
+      root.innerHTML = '';
+    }
+
+    (items || []).forEach((item) => {
+      const card = document.createElement('div');
+      card.className = 'clip-card';
+      card.draggable = true;
+
+      const preview = item.media_type === 'image'
+        ? `<img draggable="false" src="${item.thumb_url || item.preview_url}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;" />`
+        : `<video draggable="false" muted preload="metadata" src="${item.preview_url || ''}"></video>`;
+
+      card.innerHTML = `
+        ${preview}
+        <div class="name">${item.provider} · ${item.media_type}</div>
+        <div class="meta">${Number(item.duration || 0).toFixed(1)}s</div>
+        <button class="add-btn">Añadir al timeline</button>
+      `;
+
+      card.querySelector('.add-btn').onclick = async (e) => {
+        e.stopPropagation();
+        await addSearchItemToTimeline(item);
+      };
+
+      card.ondragstart = (e) => {
+        dragSearchItem = item;
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'copy';
+          try { e.dataTransfer.setData('application/x-search-item', JSON.stringify(item)); } catch {}
+        }
+      };
+      card.ondragend = () => { dragSearchItem = null; };
+
+      root.appendChild(card);
+    });
+
+    const totalRendered = root.children.length;
+    $('searchInfo').textContent = `${totalRendered} resultados · página ${searchState.page}`;
+    $('btnLoadMore').style.display = searchState.has_more ? 'block' : 'none';
+  }
+
+  async function addSearchItemToTimeline(item, targetClipId = null, insertAfter = false) {
+    setStatus('Importando y añadiendo al timeline...');
+    const payload = {
+      item,
+      add_to_timeline: true,
+      image_seconds: 6,
+    };
+
+    const res = await fetch('/api/media/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      setStatus('Error importando media: ' + (txt || 'unknown'), 'err');
+      return;
+    }
+
+    const data = await res.json().catch(() => ({}));
+    const clip = data?.clip;
+
+    if (!clip || !clip.path) {
+      setStatus('Error: importación sin clip de timeline', 'err');
+      return;
+    }
+
+    timeline.clips = timeline.clips || [];
+    const newClip = {
+      id: clip.id,
+      name: clip.name,
+      path: clip.path,
+      start: Number(clip.start || 0),
+      duration: Math.max(1, Number(clip.duration || 4)),
+      enabled: Boolean(clip.enabled),
+    };
+
+    if (targetClipId) {
+      const idx = timeline.clips.findIndex(c => c.id === targetClipId);
+      if (idx >= 0) timeline.clips.splice(insertAfter ? idx + 1 : idx, 0, newClip);
+      else timeline.clips.push(newClip);
+    } else {
+      timeline.clips.push(newClip);
+    }
+
+    selectedClipId = newClip.id;
+    selectedClipIds = new Set([newClip.id]);
+    renderAll();
+    setStatus('Clip añadido al timeline', 'ok');
+  }
+
+  async function importSearchItem(item) {
+    // Mantener compatibilidad: ahora también va directo al timeline
+    await addSearchItemToTimeline(item);
+  }
+
+  function renderAll() {
+    if ($('topicInput') && !($('topicInput').value || '').trim()) {
+      $('topicInput').value = timeline.topic || '';
+    }
+    if ($('topicMinutes')) {
+      $('topicMinutes').value = Math.max(1, Math.round(Number(timeline.target_minutes || 8)));
+    }
+    if ($('scriptText') && document.activeElement !== $('scriptText')) {
+      $('scriptText').value = String(timeline.script_text || '');
+    }
+    renderLibrary();
+    renderTimeline();
+    renderTracksMeta();
+    syncInspector();
+    renderOverlayList();
+    renderFontPreview();
+    renderTimelineSummary();
+  }
+
+  function renderSearchResults(items, append = false) {
+    const root = $('mediaSearchResults');
+    if (!append) {
+      root.innerHTML = '';
+    }
+
+    (items || []).forEach((item) => {
+      const card = document.createElement('div');
+      card.className = 'clip-card';
+      card.draggable = true;
+
+      const preview = item.media_type === 'image'
+        ? `<img draggable="false" src="${item.thumb_url || item.preview_url}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;" />`
+        : `<video draggable="false" muted preload="metadata" src="${item.preview_url || ''}"></video>`;
+
+      card.innerHTML = `
+        ${preview}
+        <div class="name">${item.provider} · ${item.media_type}</div>
+        <div class="meta">${Number(item.duration || 0).toFixed(1)}s</div>
+        <button class="add-btn">Añadir al timeline</button>
+      `;
+
+      card.querySelector('.add-btn').onclick = async (e) => {
+        e.stopPropagation();
+        await addSearchItemToTimeline(item);
+      };
+
+      card.ondragstart = (e) => {
+        dragSearchItem = item;
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'copy';
+          try { e.dataTransfer.setData('application/x-search-item', JSON.stringify(item)); } catch {}
+        }
+      };
+      card.ondragend = () => { dragSearchItem = null; };
+
+      root.appendChild(card);
+    });
+
+    const totalRendered = root.children.length;
+    $('searchInfo').textContent = `${totalRendered} resultados · página ${searchState.page}`;
+    $('btnLoadMore').style.display = searchState.has_more ? 'block' : 'none';
+  }
+
+  async function addSearchItemToTimeline(item, targetClipId = null, insertAfter = false) {
+    setStatus('Importando y añadiendo al timeline...');
+    const payload = {
+      item,
+      add_to_timeline: true,
+      image_seconds: 6,
+    };
+
+    const res = await fetch('/api/media/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      setStatus('Error importando media: ' + (txt || 'unknown'), 'err');
+      return;
+    }
+
+    const data = await res.json().catch(() => ({}));
+    const clip = data?.clip;
+
+    if (!clip || !clip.path) {
+      setStatus('Error: importación sin clip de timeline', 'err');
+      return;
+    }
+
+    timeline.clips = timeline.clips || [];
+    const newClip = {
+      id: clip.id,
+      name: clip.name,
+      path: clip.path,
+      start: Number(clip.start || 0),
+      duration: Math.max(1, Number(clip.duration || 4)),
+      enabled: Boolean(clip.enabled),
+    };
+
+    if (targetClipId) {
+      const idx = timeline.clips.findIndex(c => c.id === targetClipId);
+      if (idx >= 0) timeline.clips.splice(insertAfter ? idx + 1 : idx, 0, newClip);
+      else timeline.clips.push(newClip);
+    } else {
+      timeline.clips.push(newClip);
+    }
+
+    selectedClipId = newClip.id;
+    selectedClipIds = new Set([newClip.id]);
+    renderAll();
+    setStatus('Clip añadido al timeline', 'ok');
+  }
+
+  async function generateProjectFromTopic() {
+    await postGen('/api/project/generate', 'Generando guion/voz/subs...', 'Guion + voz + subtítulos listos');
+  }
+
+  function buildGenPayload() {
+    const unifiedQuery = String($('mediaSearch')?.value || '').trim(); // único input
+    return {
+      topic: unifiedQuery,
+      minutes: Number(timeline.target_minutes || 8),
+      script_provider: 'auto',
+      tts_provider: 'gtts',
+      voice: 'en',
+      speech_rate: '+0%',
+      script_text: String($('scriptText')?.value || '').trim(),
+    };
+  }
+
+  async function postGen(url, pendingMsg, okMsgPrefix) {
+    const payload = buildGenPayload();
+
+    const needsTopicToGenerateScript = (
+      url === '/api/script/generate' || url === '/api/project/generate'
+    );
+
+    if (needsTopicToGenerateScript && !payload.topic && !payload.script_text) {
+      setStatus('Escribe búsqueda o pega un guion en Script (editable)', 'err');
+      return;
+    }
+
+    setStatus(pendingMsg);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text();
+      setStatus('Error: ' + txt, 'err');
+      return;
+    }
+
+    await loadTimeline();
+    setStatus(okMsgPrefix, 'ok');
+  }
+
+  async function generateScriptOnly() {
+    await postGen('/api/script/generate', 'Generando guion...', 'Guion listo');
+  }
+
+  async function generateAudioOnly() {
+    await postGen('/api/audio/generate', 'Generando audio...', 'Audio listo');
+  }
+
+  async function generateSubtitlesOnly() {
+    await postGen('/api/subtitles/generate', 'Generando subtítulos...', 'Subtítulos listos');
+  }
+
+  function renderLibrary() {
+    // Biblioteca eliminada intencionalmente
+  }
+
+  function renderSearchResults(items, append = false) {
+    const root = $('mediaSearchResults');
+    if (!append) {
+      root.innerHTML = '';
+    }
+
+    (items || []).forEach((item) => {
+      const card = document.createElement('div');
+      card.className = 'clip-card';
+      card.draggable = true;
+
+      const preview = item.media_type === 'image'
+        ? `<img draggable="false" src="${item.thumb_url || item.preview_url}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;" />`
+        : `<video draggable="false" muted preload="metadata" src="${item.preview_url || ''}"></video>`;
+
+      card.innerHTML = `
+        ${preview}
+        <div class="name">${item.provider} · ${item.media_type}</div>
+        <div class="meta">${Number(item.duration || 0).toFixed(1)}s</div>
+        <button class="add-btn">Añadir al timeline</button>
+      `;
+
+      card.querySelector('.add-btn').onclick = async (e) => {
+        e.stopPropagation();
+        await addSearchItemToTimeline(item);
+      };
+
+      card.ondragstart = (e) => {
+        dragSearchItem = item;
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'copy';
+          try { e.dataTransfer.setData('application/x-search-item', JSON.stringify(item)); } catch {}
+        }
+      };
+      card.ondragend = () => { dragSearchItem = null; };
+
+      root.appendChild(card);
+    });
+
+    const totalRendered = root.children.length;
+    $('searchInfo').textContent = `${totalRendered} resultados · página ${searchState.page}`;
+    $('btnLoadMore').style.display = searchState.has_more ? 'block' : 'none';
+  }
+
+  async function addSearchItemToTimeline(item, targetClipId = null, insertAfter = false) {
+    setStatus('Importando y añadiendo al timeline...');
+    const payload = {
+      item,
+      add_to_timeline: true,
+      image_seconds: 6,
+    };
+
+    const res = await fetch('/api/media/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      setStatus('Error importando media: ' + (txt || 'unknown'), 'err');
+      return;
+    }
+
+    const data = await res.json().catch(() => ({}));
+    const clip = data?.clip;
+
+    if (!clip || !clip.path) {
+      setStatus('Error: importación sin clip de timeline', 'err');
+      return;
+    }
+
+    timeline.clips = timeline.clips || [];
+    const newClip = {
+      id: clip.id,
+      name: clip.name,
+      path: clip.path,
+      start: Number(clip.start || 0),
+      duration: Math.max(1, Number(clip.duration || 4)),
+      enabled: Boolean(clip.enabled),
+    };
+
+    if (targetClipId) {
+      const idx = timeline.clips.findIndex(c => c.id === targetClipId);
+      if (idx >= 0) timeline.clips.splice(insertAfter ? idx + 1 : idx, 0, newClip);
+      else timeline.clips.push(newClip);
+    } else {
+      timeline.clips.push(newClip);
+    }
+
+    selectedClipId = newClip.id;
+    selectedClipIds = new Set([newClip.id]);
+    renderAll();
+    setStatus('Clip añadido al timeline', 'ok');
+  }
+
+  async function importSearchItem(item) {
+    // Mantener compatibilidad: ahora también va directo al timeline
+    await addSearchItemToTimeline(item);
+  }
+
+  function renderAll() {
+    if ($('topicInput') && !($('topicInput').value || '').trim()) {
+      $('topicInput').value = timeline.topic || '';
+    }
+    if ($('topicMinutes')) {
+      $('topicMinutes').value = Math.max(1, Math.round(Number(timeline.target_minutes || 8)));
+    }
+    if ($('scriptText') && document.activeElement !== $('scriptText')) {
+      $('scriptText').value = String(timeline.script_text || '');
+    }
+    renderLibrary();
+    renderTimeline();
+    renderTracksMeta();
+    syncInspector();
+    renderOverlayList();
+    renderFontPreview();
+    renderTimelineSummary();
+  }
+
+  function renderSearchResults(items, append = false) {
+    const root = $('mediaSearchResults');
+    if (!append) {
+      root.innerHTML = '';
+    }
+
+    (items || []).forEach((item) => {
+      const card = document.createElement('div');
+      card.className = 'clip-card';
+      card.draggable = true;
+
+      const preview = item.media_type === 'image'
+        ? `<img draggable="false" src="${item.thumb_url || item.preview_url}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;" />`
+        : `<video draggable="false" muted preload="metadata" src="${item.preview_url || ''}"></video>`;
+
+      card.innerHTML = `
+        ${preview}
+        <div class="name">${item.provider} · ${item.media_type}</div>
+        <div class="meta">${Number(item.duration || 0).toFixed(1)}s</div>
+        <button class="add-btn">Añadir al timeline</button>
+      `;
+
+      card.querySelector('.add-btn').onclick = async (e) => {
+        e.stopPropagation();
+        await addSearchItemToTimeline(item);
+      };
+
+      card.ondragstart = (e) => {
+        dragSearchItem = item;
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'copy';
+          try { e.dataTransfer.setData('application/x-search-item', JSON.stringify(item)); } catch {}
+        }
+      };
+      card.ondragend = () => { dragSearchItem = null; };
+
+      root.appendChild(card);
+    });
+
+    const totalRendered = root.children.length;
+    $('searchInfo').textContent = `${totalRendered} resultados · página ${searchState.page}`;
+    $('btnLoadMore').style.display = searchState.has_more ? 'block' : 'none';
+  }
+
+  async function addSearchItemToTimeline(item, targetClipId = null, insertAfter = false) {
+    setStatus('Importando y añadiendo al timeline...');
+    const payload = {
+      item,
+      add_to_timeline: true,
+      image_seconds: 6,
+    };
+
+    const res = await fetch('/api/media/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      setStatus('Error importando media: ' + (txt || 'unknown'), 'err');
+      return;
+    }
+
+    const data = await res.json().catch(() => ({}));
+    const clip = data?.clip;
+
+    if (!clip || !clip.path) {
+      setStatus('Error: importación sin clip de timeline', 'err');
+      return;
+    }
+
+    timeline.clips = timeline.clips || [];
+    const newClip = {
+      id: clip.id,
+      name: clip.name,
+      path: clip.path,
+      start: Number(clip.start || 0),
+      duration: Math.max(1, Number(clip.duration || 4)),
+      enabled: Boolean(clip.enabled),
+    };
+
+    if (targetClipId) {
+      const idx = timeline.clips.findIndex(c => c.id === targetClipId);
+      if (idx >= 0) timeline.clips.splice(insertAfter ? idx + 1 : idx, 0, newClip);
+      else timeline.clips.push(newClip);
+    } else {
+      timeline.clips.push(newClip);
+    }
+
+    selectedClipId = newClip.id;
+    selectedClipIds = new Set([newClip.id]);
+    renderAll();
+    setStatus('Clip añadido al timeline', 'ok');
+  }
+
+  async function generateProjectFromTopic() {
+    await postGen('/api/project/generate', 'Generando guion/voz/subs...', 'Guion + voz + subtítulos listos');
+  }
+
+  function buildGenPayload() {
+    const unifiedQuery = String($('mediaSearch')?.value || '').trim(); // único input
+    return {
+      topic: unifiedQuery,
+      minutes: Number(timeline.target_minutes || 8),
+      script_provider: 'auto',
+      tts_provider: 'gtts',
+      voice: 'en',
+      speech_rate: '+0%',
+      script_text: String($('scriptText')?.value || '').trim(),
+    };
+  }
+
+  async function postGen(url, pendingMsg, okMsgPrefix) {
+    const payload = buildGenPayload();
+
+    const needsTopicToGenerateScript = (
+      url === '/api/script/generate' || url === '/api/project/generate'
+    );
+
+    if (needsTopicToGenerateScript && !payload.topic && !payload.script_text) {
+      setStatus('Escribe búsqueda o pega un guion en Script (editable)', 'err');
+      return;
+    }
+
+    setStatus(pendingMsg);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text();
+      setStatus('Error: ' + txt, 'err');
+      return;
+    }
+
+    await loadTimeline();
+    setStatus(okMsgPrefix, 'ok');
+  }
+
+  async function generateScriptOnly() {
+    await postGen('/api/script/generate', 'Generando guion...', 'Guion listo');
+  }
+
+  async function generateAudioOnly() {
+    await postGen('/api/audio/generate', 'Generando audio...', 'Audio listo');
+  }
+
+  async function generateSubtitlesOnly() {
+    await postGen('/api/subtitles/generate', 'Generando subtítulos...', 'Subtítulos listos');
+  }
+
+  function renderLibrary() {
+    // Biblioteca eliminada intencionalmente
+  }
+
+  function renderSearchResults(items, append = false) {
+    const root = $('mediaSearchResults');
+    if (!append) {
+      root.innerHTML = '';
+    }
+
+    (items || []).forEach((item) => {
+      const card = document.createElement('div');
+      card.className = 'clip-card';
+      card.draggable = true;
+
+      const preview = item.media_type === 'image'
+        ? `<img draggable="false" src="${item.thumb_url || item.preview_url}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;" />`
+        : `<video draggable="false" muted preload="metadata" src="${item.preview_url || ''}"></video>`;
+
+      card.innerHTML = `
+        ${preview}
+        <div class="name">${item.provider} · ${item.media_type}</div>
+        <div class="meta">${Number(item.duration || 0).toFixed(1)}s</div>
+        <button class="add-btn">Añadir al timeline</button>
+      `;
+
+      card.querySelector('.add-btn').onclick = async (e) => {
+        e.stopPropagation();
+        await addSearchItemToTimeline(item);
+      };
+
+      card.ondragstart = (e) => {
+        dragSearchItem = item;
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'copy';
+          try { e.dataTransfer.setData('application/x-search-item', JSON.stringify(item)); } catch {}
+        }
+      };
+      card.ondragend = () => { dragSearchItem = null; };
+
+      root.appendChild(card);
+    });
+
+    const totalRendered = root.children.length;
+    $('searchInfo').textContent = `${totalRendered} resultados · página ${searchState.page}`;
+    $('btnLoadMore').style.display = searchState.has_more ? 'block' : 'none';
+  }
+
+  async function addSearchItemToTimeline(item, targetClipId = null, insertAfter = false) {
+    setStatus('Importando y añadiendo al timeline...');
+    const payload = {
+      item,
+      add_to_timeline: true,
+      image_seconds: 6,
+    };
+
+    const res = await fetch('/api/media/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      setStatus('Error importando media: ' + (txt || 'unknown'), 'err');
+      return;
+    }
+
+    const data = await res.json().catch(() => ({}));
+    const clip = data?.clip;
+
+    if (!clip || !clip.path) {
+      setStatus('Error: importación sin clip de timeline', 'err');
+      return;
+    }
+
+    timeline.clips = timeline.clips || [];
+    const newClip = {
+      id: clip.id,
+      name: clip.name,
+      path: clip.path,
+      start: Number(clip.start || 0),
+      duration: Math.max(1, Number(clip.duration || 4)),
+      enabled: Boolean(clip.enabled),
+    };
+
+    if (targetClipId) {
+      const idx = timeline.clips.findIndex(c => c.id === targetClipId);
+      if (idx >= 0) timeline.clips.splice(insertAfter ? idx + 1 : idx, 0, newClip);
+      else timeline.clips.push(newClip);
+    } else {
+      timeline.clips.push(newClip);
+    }
+
+    selectedClipId = newClip.id;
+    selectedClipIds = new Set([newClip.id]);
+    renderAll();
+    setStatus('Clip añadido al timeline', 'ok');
+  }
+
+  async function importSearchItem(item) {
+    // Mantener compatibilidad: ahora también va directo al timeline
+    await addSearchItemToTimeline(item);
+  }
+
+  function renderAll() {
+    if ($('topicInput') && !($('topicInput').value || '').trim()) {
+      $('topicInput').value = timeline.topic || '';
+    }
+    if ($('topicMinutes')) {
+      $('topicMinutes').value = Math.max(1, Math.round(Number(timeline.target_minutes || 8)));
+    }
+    if ($('scriptText') && document.activeElement !== $('scriptText')) {
+      $('scriptText').value = String(timeline.script_text || '');
+    }
+    renderLibrary();
+    renderTimeline();
+    renderTracksMeta();
+    syncInspector();
+    renderOverlayList();
+    renderFontPreview();
+    renderTimelineSummary();
+  }
+
+  function renderSearchResults(items, append = false) {
+    const root = $('mediaSearchResults');
+    if (!append) {
+      root.innerHTML = '';
+    }
+
+    (items || []).forEach((item) => {
+      const card = document.createElement('div');
+      card.className = 'clip-card';
+      card.draggable = true;
+
+      const preview = item.media_type === 'image'
+        ? `<img draggable="false" src="${item.thumb_url || item.preview_url}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;" />`
+        : `<video draggable="false" muted preload="metadata" src="${item.preview_url || ''}"></video>`;
+
+      card.innerHTML = `
+        ${preview}
+        <div class="name">${item.provider} · ${item.media_type}</div>
+        <div class="meta">${Number(item.duration || 0).toFixed(1)}s</div>
+        <button class="add-btn">Añadir al timeline</button>
+      `;
+
+      card.querySelector('.add-btn').onclick = async (e) => {
+        e.stopPropagation();
+        await addSearchItemToTimeline(item);
+      };
+
+      card.ondragstart = (e) => {
+        dragSearchItem = item;
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'copy';
+          try { e.dataTransfer.setData('application/x-search-item', JSON.stringify(item)); } catch {}
+        }
+      };
+      card.ondragend = () => { dragSearchItem = null; };
+
+      root.appendChild(card);
+    });
+
+    const totalRendered = root.children.length;
+    $('searchInfo').textContent = `${totalRendered} resultados · página ${searchState.page}`;
+    $('btnLoadMore').style.display = searchState.has_more ? 'block' : 'none';
+  }
+
+  async function addSearchItemToTimeline(item, targetClipId = null, insertAfter = false) {
+    setStatus('Importando y añadiendo al timeline...');
+    const payload = {
+      item,
+      add_to_timeline: true,
+      image_seconds: 6,
+    };
+
+    const res = await fetch('/api/media/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      setStatus('Error importando media: ' + (txt || 'unknown'), 'err');
+      return;
+    }
+
+    const data = await res.json().catch(() => ({}));
+    const clip = data?.clip;
+
+    if (!clip || !clip.path) {
+      setStatus('Error: importación sin clip de timeline', 'err');
+      return;
+    }
+
+    timeline.clips = timeline.clips || [];
+    const newClip = {
+      id: clip.id,
+      name: clip.name,
+      path: clip.path,
+      start: Number(clip.start || 0),
+      duration: Math.max(1, Number(clip.duration || 4)),
+      enabled: Boolean(clip.enabled),
+    };
+
+    if (targetClipId) {
+      const idx = timeline.clips.findIndex(c => c.id === targetClipId);
+      if (idx >= 0) timeline.clips.splice(insertAfter ? idx + 1 : idx, 0, newClip);
+      else timeline.clips.push(newClip);
+    } else {
+      timeline.clips.push(newClip);
+    }
+
+    selectedClipId = newClip.id;
+    selectedClipIds = new Set([newClip.id]);
+    renderAll();
+    setStatus('Clip añadido al timeline', 'ok');
+  }
+
+  async function generateProjectFromTopic() {
+    await postGen('/api/project/generate', 'Generando guion/voz/subs...', 'Guion + voz + subtítulos listos');
+  }
+
+  function buildGenPayload() {
+    const unifiedQuery = String($('mediaSearch')?.value || '').trim(); // único input
+    return {
+      topic: unifiedQuery,
+      minutes: Number(timeline.target_minutes || 8),
+      script_provider: 'auto',
+      tts_provider: 'gtts',
+      voice: 'en',
+      speech_rate: '+0%',
+      script_text: String($('scriptText')?.value || '').trim(),
+    };
+  }
+
+  async function postGen(url, pendingMsg, okMsgPrefix) {
+    const payload = buildGenPayload();
+
+    const needsTopicToGenerateScript = (
+      url === '/api/script/generate' || url === '/api/project/generate'
+    );
+
+    if (needsTopicToGenerateScript && !payload.topic && !payload.script_text) {
+      setStatus('Escribe búsqueda o pega un guion en Script (editable)', 'err');
+      return;
+    }
+
+    setStatus(pendingMsg);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text();
+      setStatus('Error: ' + txt, 'err');
+      return;
+    }
+
+    await loadTimeline();
+    setStatus(okMsgPrefix, 'ok');
+  }
+
+  async function generateScriptOnly() {
+    await postGen('/api/script/generate', 'Generando guion...', 'Guion listo');
+  }
+
+  async function generateAudioOnly() {
+    await postGen('/api/audio/generate', 'Generando audio...', 'Audio listo');
+  }
+
+  async function generateSubtitlesOnly() {
+    await postGen('/api/subtitles/generate', 'Generando subtítulos...', 'Subtítulos listos');
+  }
+
+  function renderLibrary() {
+    // Biblioteca eliminada intencionalmente
+  }
+
+  function renderSearchResults(items, append = false) {
+    const root = $('mediaSearchResults');
+    if (!append) {
+      root.innerHTML = '';
+    }
+
+    (items || []).forEach((item) => {
+      const card = document.createElement('div');
+      card.className = 'clip-card';
+      card.draggable = true;
+
+      const preview = item.media_type === 'image'
+        ? `<img draggable="false" src="${item.thumb_url || item.preview_url}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;" />`
+        : `<video draggable="false" muted preload="metadata" src="${item.preview_url || ''}"></video>`;
+
+      card.innerHTML = `
+        ${preview}
+        <div class="name">${item.provider} · ${item.media_type}</div>
+        <div class="meta">${Number(item.duration || 0).toFixed(1)}s</div>
+        <button class="add-btn">Añadir al timeline</button>
+      `;
+
+      card.querySelector('.add-btn').onclick = async (e) => {
+        e.stopPropagation();
+        await addSearchItemToTimeline(item);
+      };
+
+      card.ondragstart = (e) => {
+        dragSearchItem = item;
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'copy';
+          try { e.dataTransfer.setData('application/x-search-item', JSON.stringify(item)); } catch {}
+        }
+      };
+      card.ondragend = () => { dragSearchItem = null; };
+
+      root.appendChild(card);
+    });
+
+    const totalRendered = root.children.length;
+    $('searchInfo').textContent = `${totalRendered} resultados · página ${searchState.page}`;
+    $('btnLoadMore').style.display = searchState.has_more ? 'block' : 'none';
+  }
+
+  async function addSearchItemToTimeline(item, targetClipId = null, insertAfter = false) {
+    setStatus('Importando y añadiendo al timeline...');
+    const payload = {
+      item,
+      add_to_timeline: true,
+      image_seconds: 6,
+    };
+
+    const res = await fetch('/api/media/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      setStatus('Error importando media: ' + (txt || 'unknown'), 'err');
+      return;
+    }
+
+    const data = await res.json().catch(() => ({}));
+    const clip = data?.clip;
+
+    if (!clip || !clip.path) {
+      setStatus('Error: importación sin clip de timeline', 'err');
+      return;
+    }
+
+    timeline.clips = timeline.clips || [];
+    const newClip = {
+      id: clip.id,
+      name: clip.name,
+      path: clip.path,
+      start: Number(clip.start || 0),
+      duration: Math.max(1, Number(clip.duration || 4)),
+      enabled: Boolean(clip.enabled),
+    };
+
+    if (targetClipId) {
+      const idx = timeline.clips.findIndex(c => c.id === targetClipId);
+      if (idx >= 0) timeline.clips.splice(insertAfter ? idx + 1 : idx, 0, newClip);
+      else timeline.clips.push(newClip);
+    } else {
+      timeline.clips.push(newClip);
+    }
+
+    selectedClipId = newClip.id;
+    selectedClipIds = new Set([newClip.id]);
+    renderAll();
+    setStatus('Clip añadido al timeline', 'ok');
+  }
+
+  async function importSearchItem(item) {
+    // Mantener compatibilidad: ahora también va directo al timeline
+    await addSearchItemToTimeline(item);
+  }
+
+  function renderAll() {
+    if ($('topicInput') && !($('topicInput').value || '').trim()) {
+      $('topicInput').value = timeline.topic || '';
+    }
+    if ($('topicMinutes')) {
+      $('topicMinutes').value = Math.max(1, Math.round(Number(timeline.target_minutes || 8)));
+    }
+    if ($('scriptText') && document.activeElement !== $('scriptText')) {
+      $('scriptText').value = String(timeline.script_text || '');
+    }
+    renderLibrary();
+    renderTimeline();
+    renderTracksMeta();
+    syncInspector();
+    renderOverlayList();
+    renderFontPreview();
+    renderTimelineSummary();
+  }
+
+  function renderSearchResults(items, append = false) {
+    const root = $('mediaSearchResults');
+    if (!append) {
+      root.innerHTML = '';
+    }
+
+    (items || []).forEach((item) => {
+      const card = document.createElement('div');
+      card.className = 'clip-card';
+      card.draggable = true;
+
+      const preview = item.media_type === 'image'
+        ? `<img draggable="false" src="${item.thumb_url || item.preview_url}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;" />`
+        : `<video draggable="false" muted preload="metadata" src="${item.preview_url || ''}"></video>`;
+
+      card.innerHTML = `
+        ${preview}
+        <div class="name">${item.provider} · ${item.media_type}</div>
+        <div class="meta">${Number(item.duration || 0).toFixed(1)}s</div>
+        <button class="add-btn">Añadir al timeline</button>
+      `;
+
+      card.querySelector('.add-btn').onclick = async (e) => {
+        e.stopPropagation();
+        await addSearchItemToTimeline(item);
+      };
+
+      card.ondragstart = (e) => {
+        dragSearchItem = item;
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'copy';
+          try { e.dataTransfer.setData('application/x-search-item', JSON.stringify(item)); } catch {}
+        }
+      };
+      card.ondragend = () => { dragSearchItem = null; };
+
+      root.appendChild(card);
+    });
+
+    const totalRendered = root.children.length;
+    $('searchInfo').textContent = `${totalRendered} resultados · página ${searchState.page}`;
+    $('btnLoadMore').style.display = searchState.has_more ? 'block' : 'none';
+  }
+
+  async function addSearchItemToTimeline(item, targetClipId = null, insertAfter = false) {
+    setStatus('Importando y añadiendo al timeline...');
+    const payload = {
+      item,
+      add_to_timeline: true,
+      image_seconds: 6,
+    };
+
+    const res = await fetch('/api/media/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      setStatus('Error importando media: ' + (txt || 'unknown'), 'err');
+      return;
+    }
+
+    const data = await res.json().catch(() => ({}));
+    const clip = data?.clip;
+
+    if (!clip || !clip.path) {
+      setStatus('Error: importación sin clip de timeline', 'err');
+      return;
+    }
+
+    timeline.clips = timeline.clips || [];
+    const newClip = {
+      id: clip.id,
+      name: clip.name,
+      path: clip.path,
+      start: Number(clip.start || 0),
+      duration: Math.max(1, Number(clip.duration || 4)),
+      enabled: Boolean(clip.enabled),
+    };
+
+    if (targetClipId) {
+      const idx = timeline.clips.findIndex(c => c.id === targetClipId);
+      if (idx >= 0) timeline.clips.splice(insertAfter ? idx + 1 : idx, 0, newClip);
+      else timeline.clips.push(newClip);
+    } else {
+      timeline.clips.push(newClip);
+    }
+
+    selectedClipId = newClip.id;
+    selectedClipIds = new Set([newClip.id]);
+    renderAll();
+    setStatus('Clip añadido al timeline', 'ok');
+  }
+
+  async function generateProjectFromTopic() {
+    await postGen('/api/project/generate', 'Generando guion/voz/subs...', 'Guion + voz + subtítulos listos');
+  }
+
+  function buildGenPayload() {
+    const unifiedQuery = String($('mediaSearch')?.value || '').trim(); // único input
+    return {
+      topic: unifiedQuery,
+      minutes: Number(timeline.target_minutes || 8),
+      script_provider: 'auto',
+      tts_provider: 'gtts',
+      voice: 'en',
+      speech_rate: '+0%',
+      script_text: String($('scriptText')?.value || '').trim(),
+    };
+  }
+
+  async function postGen(url, pendingMsg, okMsgPrefix) {
+    const payload = buildGenPayload();
+
+    const needsTopicToGenerateScript = (
+      url === '/api/script/generate' || url === '/api/project/generate'
+    );
+
+    if (needsTopicToGenerateScript && !payload.topic && !payload.script_text) {
+      setStatus('Escribe búsqueda o pega un guion en Script (editable)', 'err');
+      return;
+    }
+
+    setStatus(pendingMsg);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text();
+      setStatus('Error: ' + txt, 'err');
+      return;
+    }
+
+    await loadTimeline();
+    setStatus(okMsgPrefix, 'ok');
+  }
+
+  async function generateScriptOnly() {
+    await postGen('/api/script/generate', 'Generando guion...', 'Guion listo');
+  }
+
+  async function generateAudioOnly() {
+    await postGen('/api/audio/generate', 'Generando audio...', 'Audio listo');
+  }
+
+  async function generateSubtitlesOnly() {
+    await postGen('/api/subtitles/generate', 'Generando subtítulos...', 'Subtítulos listos');
+  }
+
+  function renderLibrary() {
+    // Biblioteca eliminada intencionalmente
+  }
+
+  function renderSearchResults(items, append = false) {
+    const root = $('mediaSearchResults');
+    if (!append) {
+      root.innerHTML = '';
+    }
+
+    (items || []).forEach((item) => {
+      const card = document.createElement('div');
+      card.className = 'clip-card';
+      card.draggable = true;
+
+      const preview = item.media_type === 'image'
+        ? `<img draggable="false" src="${item.thumb_url || item.preview_url}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;" />`
+        : `<video draggable="false" muted preload="metadata" src="${item.preview_url || ''}"></video>`;
+
+      card.innerHTML = `
+        ${preview}
+        <div class="name">${item.provider} · ${item.media_type}</div>
+        <div class="meta">${Number(item.duration || 0).toFixed(1)}s</div>
+        <button class="add-btn">Añadir al timeline</button>
+      `;
+
+      card.querySelector('.add-btn').onclick = async (e) => {
+        e.stopPropagation();
+        await addSearchItemToTimeline(item);
+      };
+
+      card.ondragstart = (e) => {
+        dragSearchItem = item;
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'copy';
+          try { e.dataTransfer.setData('application/x-search-item', JSON.stringify(item)); } catch {}
+        }
+      };
+      card.ondragend = () => { dragSearchItem = null; };
+
+      root.appendChild(card);
+    });
+
+    const totalRendered = root.children.length;
+    $('searchInfo').textContent = `${totalRendered} resultados · página ${searchState.page}`;
+    $('btnLoadMore').style.display = searchState.has_more ? 'block' : 'none';
+  }
+
+  async function addSearchItemToTimeline(item, targetClipId = null, insertAfter = false) {
+    setStatus('Importando y añadiendo al timeline...');
+    const payload = {
+      item,
+      add_to_timeline: true,
+      image_seconds: 6,
+    };
+
+    const res = await fetch('/api/media/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      setStatus('Error importando media: ' + (txt || 'unknown'), 'err');
+      return;
+    }
+
+    const data = await res.json().catch(() => ({}));
+    const clip = data?.clip;
+
+    if (!clip || !clip.path) {
+      setStatus('Error: importación sin clip de timeline', 'err');
+      return;
+    }
+
+    timeline.clips = timeline.clips || [];
+    const newClip = {
+      id: clip.id,
+      name: clip.name,
+      path: clip.path,
+      start: Number(clip.start || 0),
+      duration: Math.max(1, Number(clip.duration || 4)),
+      enabled: Boolean(clip.enabled),
+    };
+
+    if (targetClipId) {
+      const idx = timeline.clips.findIndex(c => c.id === targetClipId);
+      if (idx >= 0) timeline.clips.splice(insertAfter ? idx + 1 : idx, 0, newClip);
+      else timeline.clips.push(newClip);
+    } else {
+      timeline.clips.push(newClip);
+    }
+
+    selectedClipId = newClip.id;
+    selectedClipIds = new Set([newClip.id]);
+    renderAll();
+    setStatus('Clip añadido al timeline', 'ok');
+  }
+
+  async function importSearchItem(item) {
+    // Mantener compatibilidad: ahora también va directo al timeline
+    await addSearchItemToTimeline(item);
+  }
+
+  function renderAll() {
+    if ($('topicInput') && !($('topicInput').value || '').trim()) {
+      $('topicInput').value = timeline.topic || '';
+    }
+    if ($('topicMinutes')) {
+      $('topicMinutes').value = Math.max(1, Math.round(Number(timeline.target_minutes || 8)));
+    }
+    if ($('scriptText') && document.activeElement !== $('scriptText')) {
+      $('scriptText').value = String(timeline.script_text || '');
+    }
+    renderLibrary();
+    renderTimeline();
+    renderTracksMeta();
+    syncInspector();
+    renderOverlayList();
+    renderFontPreview();
+    renderTimelineSummary();
+  }
+
+  function renderSearchResults(items, append = false) {
+    const root = $('mediaSearchResults');
+    if (!append) {
+      root.innerHTML = '';
+    }
+
+    (items || []).forEach((item) => {
+      const card = document.createElement('div');
+      card.className = 'clip-card';
+      card.draggable = true;
+
+      const preview = item.media_type === 'image'
+        ? `<img draggable="false" src="${item.thumb_url || item.preview_url}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;" />`
+        : `<video draggable="false" muted preload="metadata" src="${item.preview_url || ''}"></video>`;
+
+      card.innerHTML = `
+        ${preview}
+        <div class="name">${item.provider} · ${item.media_type}</div>
+        <div class="meta">${Number(item.duration || 0).toFixed(1)}s</div>
+        <button class="add-btn">Añadir al timeline</button>
+      `;
+
+      card.querySelector('.add-btn').onclick = async (e) => {
+        e.stopPropagation();
+        await addSearchItemToTimeline(item);
+      };
+
+      card.ondragstart = (e) => {
+        dragSearchItem = item;
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'copy';
+          try { e.dataTransfer.setData('application/x-search-item', JSON.stringify(item)); } catch {}
+        }
+      };
+      card.ondragend = () => { dragSearchItem = null; };
+
+      root.appendChild(card);
+    });
+
+    const totalRendered = root.children.length;
+    $('searchInfo').textContent = `${totalRendered} resultados · página ${searchState.page}`;
+    $('btnLoadMore').style.display = searchState.has_more ? 'block' : 'none';
+  }
+
+  async function addSearchItemToTimeline(item, targetClipId = null, insertAfter = false) {
+    setStatus('Importando y añadiendo al timeline...');
+    const payload = {
+      item,
+      add_to_timeline: true,
+      image_seconds: 6,
+    };
+
+    const res = await fetch('/api/media/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      setStatus('Error importando media: ' + (txt || 'unknown'), 'err');
+      return;
+    }
+
+    const data = await res.json().catch(() => ({}));
+    const clip = data?.clip;
+
+    if (!clip || !clip.path) {
+      setStatus('Error: importación sin clip de timeline', 'err');
+      return;
+    }
+
+    timeline.clips = timeline.clips || [];
+    const newClip = {
+      id: clip.id,
+      name: clip.name,
+      path: clip.path,
+      start: Number(clip.start || 0),
+      duration: Math.max(1, Number(clip.duration || 4)),
+      enabled: Boolean(clip.enabled),
+    };
+
+    if (targetClipId) {
+      const idx = timeline.clips.findIndex(c => c.id === targetClipId);
+      if (idx >= 0) timeline.clips.splice(insertAfter ? idx + 1 : idx, 0, newClip);
+      else timeline.clips.push(newClip);
+    } else {
+      timeline.clips.push(newClip);
+    }
+
+    selectedClipId = newClip.id;
+    selectedClipIds = new Set([newClip.id]);
+    renderAll();
+    setStatus('Clip añadido al timeline', 'ok');
+  }
+
+  async function generateProjectFromTopic() {
+    await postGen('/api/project/generate', 'Generando guion/voz/subs...', 'Guion + voz + subtítulos listos');
+  }
+
+  function buildGenPayload() {
+    const unifiedQuery = String($('mediaSearch')?.value || '').trim(); // único input
+    return {
+      topic: unifiedQuery,
+      minutes: Number(timeline.target_minutes || 8),
+      script_provider: 'auto',
+      tts_provider: 'gtts',
+      voice: 'en',
+      speech_rate: '+0%',
+      script_text: String($('scriptText')?.value || '').trim(),
+    };
+  }
+
+  async function postGen(url, pendingMsg, okMsgPrefix) {
+    const payload = buildGenPayload();
+
+    const needsTopicToGenerateScript = (
+      url === '/api/script/generate' || url === '/api/project/generate'
+    );
+
+    if (needsTopicToGenerateScript && !payload.topic && !payload.script_text) {
+      setStatus('Escribe búsqueda o pega un guion en Script (editable)', 'err');
+      return;
+    }
+
+    setStatus(pendingMsg);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text();
+      setStatus('Error: ' + txt, 'err');
+      return;
+    }
+
+    await loadTimeline();
+    setStatus(okMsgPrefix, 'ok');
+  }
+
+  async function generateScriptOnly() {
+    await postGen('/api/script/generate', 'Generando guion...', 'Guion listo');
+  }
+
+  async function generateAudioOnly() {
+    await postGen('/api/audio/generate', 'Generando audio...', 'Audio listo');
+  }
+
+  async function generateSubtitlesOnly() {
+    await postGen('/api/subtitles/generate', 'Generando subtítulos...', 'Subtítulos listos');
+  }
+
+  function renderLibrary() {
+    // Biblioteca eliminada intencionalmente
+  }
+
+  function renderSearchResults(items, append = false) {
+    const root = $('mediaSearchResults');
+    if (!append) {
+      root.innerHTML = '';
+    }
+
+    (items || []).forEach((item) => {
+      const card = document.createElement('div');
+      card.className = 'clip-card';
+      card.draggable = true;
+
+      const preview = item.media_type === 'image'
+        ? `<img draggable="false" src="${item.thumb_url || item.preview_url}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;" />`
+        : `<video draggable="false" muted preload="metadata" src="${item.preview_url || ''}"></video>`;
+
+      card.innerHTML = `
+        ${preview}
+        <div class="name">${item.provider} · ${item.media_type}</div>
+        <div class="meta">${Number(item.duration || 0).toFixed(1)}s</div>
+        <button class="add-btn">Añadir al timeline</button>
+      `;
+
+      card.querySelector('.add-btn').onclick = async (e) => {
+        e.stopPropagation();
+        await addSearchItemToTimeline(item);
+      };
+
+      card.ondragstart = (e) => {
+        dragSearchItem = item;
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'copy';
+          try { e.dataTransfer.setData('application/x-search-item', JSON.stringify(item)); } catch {}
+        }
+      };
+      card.ondragend = () => { dragSearchItem = null; };
+
+      root.appendChild(card);
+    });
+
+    const totalRendered = root.children.length;
+    $('searchInfo').textContent = `${totalRendered} resultados · página ${searchState.page}`;
+    $('btnLoadMore').style.display = searchState.has_more ? 'block' : 'none';
+  }
+
+  async function addSearchItemToTimeline(item, targetClipId = null, insertAfter = false) {
+    setStatus('Importando y añadiendo al timeline...');
+    const payload = {
+      item,
+      add_to_timeline: true,
+      image_seconds: 6,
+    };
+
+    const res = await fetch('/api/media/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      setStatus('Error importando media: ' + (txt || 'unknown'), 'err');
+      return;
+    }
+
+    const data = await res.json().catch(() => ({}));
+    const clip = data?.clip;
+
+    if (!clip || !clip.path) {
+      setStatus('Error: importación sin clip de timeline', 'err');
+      return;
+    }
+
+    timeline.clips = timeline.clips || [];
+    const newClip = {
+      id: clip.id,
+      name: clip.name,
+      path: clip.path,
+      start: Number(clip.start || 0),
+      duration: Math.max(1, Number(clip.duration || 4)),
+      enabled: Boolean(clip.enabled),
+    };
+
+    if (targetClipId) {
+      const idx = timeline.clips.findIndex(c => c.id === targetClipId);
+      if (idx >= 0) timeline.clips.splice(insertAfter ? idx + 1 : idx, 0, newClip);
+      else timeline.clips.push(newClip);
+    } else {
+      timeline.clips.push(newClip);
+    }
+
+    selectedClipId = newClip.id;
+    selectedClipIds = new Set([newClip.id]);
+    renderAll();
+    setStatus('Clip añadido al timeline', 'ok');
+  }
+
+  async function importSearchItem(item) {
+    // Mantener compatibilidad: ahora también va directo al timeline
+    await addSearchItemToTimeline(item);
+  }
+
+  function renderAll() {
+    if ($('topicInput') && !($('topicInput').value || '').trim()) {
+      $('topicInput').value = timeline.topic || '';
+    }
+    if ($('topicMinutes')) {
+      $('topicMinutes').value = Math.max(1, Math.round(Number(timeline.target_minutes || 8)));
+    }
+    if ($('scriptText') && document.activeElement !== $('scriptText')) {
+      $('scriptText').value = String(timeline.script_text || '');
+    }
+    renderLibrary();
+    renderTimeline();
+    renderTracksMeta();
+    syncInspector();
+    renderOverlayList();
+    renderFontPreview();
+    renderTimelineSummary();
+  }
+
+  function renderSearchResults(items, append = false) {
+    const root = $('mediaSearchResults');
+    if (!append) {
+      root.innerHTML = '';
+    }
+
+    (items || []).forEach((item) => {
+      const card = document.createElement('div');
+      card.className = 'clip-card';
+      card.draggable = true;
+
+      const preview = item.media_type === 'image'
+        ? `<img draggable="false" src="${item.thumb_url || item.preview_url}" style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;" />`
+        : `<video draggable="false" muted preload="metadata" src="${item.preview_url || ''}"></video>`;
+
+      card.innerHTML = `
+        ${preview}
+        <div class="name">${item.provider} · ${item.media_type}</div>
+        <div class="meta">${Number(item.duration || 0).toFixed(1)}s</div>
+        <button class="add-btn">Añadir al timeline</button>
+      `;
+
+      card.querySelector('.add-btn').onclick = async (e) => {
+        e.stopPropagation();
+        await addSearchItemToTimeline(item);
+      };
+
+      card.ondragstart = (e) => {
+        dragSearchItem = item;
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'copy';
+          try { e.dataTransfer.setData('application/x-search-item', JSON.stringify(item)); } catch {}
+        }
+      };
+      card.ondragend = () => { dragSearchItem = null; };
+
+      root.appendChild(card);
+    });
+
+    const totalRendered = root.children.length;
+    $('searchInfo').textContent = `${totalRendered} resultados · página ${searchState.page}`;
+    $('btnLoadMore').style.display = searchState.has_more ? 'block' : 'none';
+  }
+
+  async function addSearchItemToTimeline(item, targetClipId = null, insertAfter = false) {
+    setStatus('Importando y añadiendo al timeline...');
+    const payload = {
+      item,
+      add_to_timeline: true,
+      image_seconds: 6,
+    };
+
+    const res = await fetch('/api/media/import', {
+      method: '

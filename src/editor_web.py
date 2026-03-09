@@ -3,7 +3,7 @@ import subprocess
 import uuid
 import webbrowser
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import requests
 from flask import Flask, Response, jsonify, request, send_from_directory
@@ -41,6 +41,7 @@ def create_app(workspace_root: Path, timeline_path: Path):
     fonts_dir = workspace_root / "assets" / "fonts"
     fonts_dir.mkdir(parents=True, exist_ok=True)
     fonts_index_path = fonts_dir / "fonts_index.json"
+    web_dist = workspace_root / "web" / "dist"
 
     app = Flask(__name__)
 
@@ -160,36 +161,36 @@ def create_app(workspace_root: Path, timeline_path: Path):
 
     def _to_editor_payload(data: dict) -> dict:
         clips = []
-        for seg in data.get("segments", []):
+        for seg in data.get("segments", []) + data.get("clips", []):
             clips.append(
                 {
-                    "id": seg.get("id"),
-                    "name": seg.get("name") or Path(seg.get("clip_path", "")).name,
-                    "path": seg.get("clip_path", ""),
+                    "id": seg.get("id") or str(uuid.uuid4()),
+                    "name": seg.get("name") or Path(str(seg.get("clip_path", seg.get("path", "")))).name,
+                    "path": str(seg.get("path") or seg.get("clip_path", "")),
                     "start": float(seg.get("start", 0.0)),
                     "duration": float(seg.get("duration", 4.0)),
                     "enabled": bool(seg.get("enabled", True)),
                 }
             )
 
+        # Deduplicar por id
+        seen = set()
+        unique_clips = []
+        for c in clips:
+            if c["id"] not in seen:
+                seen.add(c["id"])
+                unique_clips.append(c)
+
         return {
             "topic": data.get("topic", ""),
             "target_minutes": float(data.get("target_minutes", 10.0)),
             "desired_seconds": float(data.get("desired_seconds", 0.0)),
+            "script_text": data.get("script_text", "") or _read_script_text(),
+            "audio_dirty": bool(data.get("audio_dirty", False)),
             "library": data.get("library", []),
-            "clips": clips,
-            "audio": {
-                "path": data.get("voice_path", ""),
-                "name": Path(data.get("voice_path", "")).name if data.get("voice_path") else "",
-            },
-            "subtitles": {
-                "path": data.get("srt_path", ""),
-                "name": Path(data.get("srt_path", "")).name if data.get("srt_path") else "",
-            },
-            "out_path": data.get("out_path", ""),
-            "max_clip_segment_seconds": float(data.get("max_clip_segment_seconds", 6.0)),
-            "subtitle_style": data.get("subtitle_style", {}),
-            "overlays": data.get("overlays", []),
+            "clips": unique_clips,
+            "audio": {"name": Path(data["voice_path"]).name} if data.get("voice_path") and Path(data["voice_path"]).exists() else None,
+            "subtitles": {"name": Path(data["srt_path"]).name} if data.get("srt_path") and Path(data["srt_path"]).exists() else None,
         }
 
     def _search_pexels(
@@ -421,38 +422,59 @@ def create_app(workspace_root: Path, timeline_path: Path):
     def _save_from_editor(payload: dict) -> dict:
         data = load_timeline(timeline_path)
 
-        cleaned_clips = []
-        for clip in payload.get("clips", []):
-            clip_path = Path(clip.get("path", "")).resolve()
-            if not _is_inside(workspace_root, clip_path):
-                continue
-            cleaned_clips.append(
-                {
-                    "id": clip.get("id"),
-                    "name": clip.get("name") or clip_path.name,
-                    "clip_path": str(clip_path),
-                    "start": max(0.0, float(clip.get("start", 0.0))),
-                    "duration": max(1.0, float(clip.get("duration", 4.0))),
-                    "enabled": bool(clip.get("enabled", True)),
-                }
+        old_segments = data.get("segments", []) or []
+        cleaned_clips = old_segments
+
+        has_clips = "clips" in payload
+        if has_clips:
+            cleaned_clips = []
+            for clip in payload.get("clips", []):
+                clip_path = Path(clip.get("path", "")).resolve()
+                if not _is_inside(workspace_root, clip_path):
+                    continue
+                cleaned_clips.append(
+                    {
+                        "id": clip.get("id"),
+                        "name": clip.get("name") or clip_path.name,
+                        "clip_path": str(clip_path),
+                        "start": max(0.0, float(clip.get("start", 0.0))),
+                        "duration": max(1.0, float(clip.get("duration", 4.0))),
+                        "enabled": bool(clip.get("enabled", True)),
+                    }
+                )
+
+        def _clip_sig(seg: dict) -> tuple:
+            p = str(Path(str(seg.get("clip_path", ""))).resolve()).lower()
+            return (
+                p,
+                round(float(seg.get("start", 0.0) or 0.0), 3),
+                round(float(seg.get("duration", 4.0) or 4.0), 3),
+                bool(seg.get("enabled", True)),
             )
 
-        library = []
-        for item in payload.get("library", data.get("library", [])):
-            p = Path(item.get("path", "")).resolve() if isinstance(item, dict) else Path(str(item)).resolve()
-            if not _is_inside(workspace_root, p):
-                continue
-            library.append(
-                {
-                    "id": item.get("id") if isinstance(item, dict) else None,
-                    "path": str(p),
-                    "name": item.get("name") if isinstance(item, dict) and item.get("name") else p.name,
-                    "duration": float(item.get("duration", 0.0)) if isinstance(item, dict) else 0.0,
-                }
-            )
+        clips_changed = has_clips and ([_clip_sig(s) for s in old_segments] != [_clip_sig(s) for s in cleaned_clips])
 
-        data["segments"] = cleaned_clips
-        data["library"] = library
+        if has_clips:
+            data["segments"] = cleaned_clips
+
+        if "library" in payload:
+            library = []
+            for item in payload.get("library", []):
+                p = Path(item.get("path", "")).resolve() if isinstance(item, dict) else Path(str(item)).resolve()
+                if not _is_inside(workspace_root, p):
+                    continue
+                library.append(
+                    {
+                        "id": item.get("id") if isinstance(item, dict) else None,
+                        "path": str(p),
+                        "name": item.get("name") if isinstance(item, dict) and item.get("name") else p.name,
+                        "duration": float(item.get("duration", 0.0)) if isinstance(item, dict) else 0.0,
+                    }
+                )
+            data["library"] = library
+
+        if clips_changed:
+            data["audio_dirty"] = True
 
         style = payload.get("subtitle_style", data.get("subtitle_style", {}))
         data["subtitle_style"] = {
@@ -498,17 +520,196 @@ def create_app(workspace_root: Path, timeline_path: Path):
             )
 
         data["overlays"] = overlays
+
+        if "script_text" in payload:
+            incoming_script = str(payload.get("script_text", "") or "")
+            if incoming_script != str(data.get("script_text", "") or ""):
+                data["script_text"] = incoming_script
+                _write_script_text(incoming_script)
+                data["audio_dirty"] = True
+
+        # Marca que el timeline fue editado desde la UI (para distinguirlo de
+        # timelines autogenerados por el modo batch).
+        data["editor_touched"] = True
+
         save_timeline(timeline_path, data)
         return data
+    def _generate_script_only(payload: dict) -> dict:
+        if any(k in payload for k in ("clips", "library", "overlays", "subtitle_style", "script_text")):
+            _save_from_editor(payload)
+
+        current = load_timeline(timeline_path)
+        topic = str(payload.get("topic", current.get("topic", ""))).strip()
+        if not topic:
+            raise ValueError("topic is required")
+
+        requested_minutes = float(payload.get("minutes", current.get("target_minutes", 8.0) or 8.0))
+        script_provider = str(payload.get("script_provider", "auto")).strip() or "auto"
+        script_text = str(payload.get("script_text", "")).strip()
+
+        if not script_text:
+            script_text = generate_script(
+                topic=topic,
+                target_minutes=max(1, int(round(requested_minutes))),
+                ollama_base_url=settings.OLLAMA_BASE_URL,
+                ollama_model=settings.OLLAMA_MODEL,
+                openai_api_key=settings.OPENAI_API_KEY,
+                openai_model=settings.OPENAI_MODEL,
+                provider=script_provider,
+            )
+
+        script_path = _write_script_text(script_text)
+        current["topic"] = topic
+        current["target_minutes"] = float(requested_minutes)
+        current["script_text"] = script_text
+        current["audio_dirty"] = True
+        save_timeline(timeline_path, current)
+
+        return {
+            "ok": True,
+            "topic": topic,
+            "script_path": str(script_path),
+            "script_text": script_text,
+        }
+
+    def _generate_audio_only(payload: dict) -> dict:
+        if any(k in payload for k in ("clips", "library", "overlays", "subtitle_style", "script_text")):
+            _save_from_editor(payload)
+
+        current = load_timeline(timeline_path)
+        topic = str(payload.get("topic", current.get("topic", ""))).strip()
+        if not topic:
+            raise ValueError("topic is required")
+
+        script_text = (
+            str(payload.get("script_text", "")).strip()
+            or str(current.get("script_text", "")).strip()
+            or _read_script_text().strip()
+        )
+        if not script_text:
+            raise ValueError("No hay script. Genera o pega un guion primero.")
+
+        tts_provider = str(payload.get("tts_provider", "gtts")).strip() or "gtts"
+        voice = str(payload.get("voice", "en")).strip() or "en"
+        speech_rate = str(payload.get("speech_rate", "+0%")).strip() or "+0%"
+
+        voice_path = _create_voice_from_text(script_text, tts_provider, voice, speech_rate)
+
+        current["topic"] = topic
+        current["script_text"] = script_text
+        current["voice_path"] = str(Path(voice_path).resolve())
+        current["audio_dirty"] = True
+        save_timeline(timeline_path, current)
+
+        return {
+            "ok": True,
+            "topic": topic,
+            "voice_path": str(Path(voice_path).resolve()),
+        }
+
+    def _generate_subtitles_only(payload: dict) -> dict:
+        if any(k in payload for k in ("clips", "library", "overlays", "subtitle_style", "script_text")):
+            _save_from_editor(payload)
+
+        current = load_timeline(timeline_path)
+        voice_path = Path(str(current.get("voice_path", "") or "")).resolve()
+        if not voice_path.exists():
+            raise ValueError("Falta audio. Genera audio primero.")
+
+        srt_path = out_dir / "subtitles.srt"
+        whisper_to_srt(audio_path=voice_path, srt_path=srt_path)
+
+        current["srt_path"] = str(srt_path.resolve())
+        current["audio_dirty"] = False
+        save_timeline(timeline_path, current)
+
+        return {
+            "ok": True,
+            "voice_path": str(voice_path),
+            "srt_path": str(srt_path.resolve()),
+        }
+
+
+    def _enabled_timeline_seconds(data: dict) -> float:
+        total = 0.0
+        for seg in data.get("segments", []):
+            if seg.get("enabled", True):
+                total += max(0.0, float(seg.get("duration", 0.0)))
+        return total
+
+    def _read_script_text() -> str:
+        script_path = out_dir / "script.txt"
+        if not script_path.exists():
+            return ""
+        try:
+            return script_path.read_text(encoding="utf-8")
+        except Exception:
+            return ""
+
+    def _write_script_text(text: str) -> Path:
+        script_path = out_dir / "script.txt"
+        script_path.write_text(text, encoding="utf-8")
+        return script_path
 
     @app.get("/")
     def index():
         html_path = workspace_root / "web" / "editor.html"
-        return Response(html_path.read_text(encoding="utf-8"), mimetype="text/html")
+        if not html_path.exists():
+            return Response("web/editor.html not found", status=500)
+        resp = Response(html_path.read_text(encoding="utf-8"), mimetype="text/html")
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+        return resp
+
+    @app.get("/react")
+    def react_index():
+        dist_index = web_dist / "index.html"
+        if not dist_index.exists():
+            return Response("React build not found. Run: npm --prefix web run build", status=404)
+        resp = Response(dist_index.read_text(encoding="utf-8"), mimetype="text/html")
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+        return resp
+
+    @app.get("/assets/<path:filename>")
+    def static_assets(filename: str):
+        assets_dir = web_dist / "assets"
+        if not assets_dir.exists():
+            return Response("web/dist/assets not found", status=404)
+        return send_from_directory(assets_dir, filename)
 
     @app.get("/api/timeline")
     def api_timeline():
-        return jsonify(_to_editor_payload(load_timeline(timeline_path)))
+        data = load_timeline(timeline_path)
+        clips = []
+        for seg in data.get("segments", []) + data.get("clips", []):
+            clips.append({
+                "id": seg.get("id") or str(uuid.uuid4()),
+                "name": seg.get("name") or Path(str(seg.get("clip_path", seg.get("path", "")))).name,
+                "path": str(seg.get("path") or seg.get("clip_path", "")),
+                "start": float(seg.get("start", 0.0)),
+                "duration": float(seg.get("duration", 4.0)),
+                "enabled": bool(seg.get("enabled", True)),
+            })
+        # Deduplicar por id
+        seen = set()
+        unique_clips = []
+        for c in clips:
+            if c["id"] not in seen:
+                seen.add(c["id"])
+                unique_clips.append(c)
+        return jsonify({
+            "clips": unique_clips,
+            "script_text": data.get("script_text", ""),
+            "target_minutes": data.get("target_minutes", 8),
+            "topic": data.get("topic", ""),
+            "voice_path": data.get("voice_path", ""),
+            "srt_path": data.get("srt_path", ""),
+            "audio": {"name": Path(data["voice_path"]).name} if data.get("voice_path") and Path(data["voice_path"]).exists() else None,
+            "subtitles": {"name": Path(data["srt_path"]).name} if data.get("srt_path") and Path(data["srt_path"]).exists() else None,
+        })
 
     @app.post("/api/timeline")
     @app.put("/api/timeline")
@@ -555,10 +756,12 @@ def create_app(workspace_root: Path, timeline_path: Path):
         segments = data.get("segments", [])
         if not segments:
             return Response("Timeline vacío: añade clips antes de renderizar", status=400)
+        if bool(data.get("audio_dirty", False)):
+            return Response("El audio está desactualizado: genera audio+subtítulos otra vez", status=400)
         if not data.get("voice_path") or not Path(data["voice_path"]).exists():
-            return Response("Falta audio: usa 'Generar guion+voz+subs'", status=400)
+            return Response("Falta audio", status=400)
         if not data.get("srt_path") or not Path(data["srt_path"]).exists():
-            return Response("Faltan subtítulos: usa 'Generar guion+voz+subs'", status=400)
+            return Response("Faltan subtítulos", status=400)
 
         build_video(
             clip_paths=[],
@@ -591,8 +794,10 @@ def create_app(workspace_root: Path, timeline_path: Path):
 
         items = []
         has_more = False
-        try:
-            if "pexels" in providers:
+        warnings = []
+
+        if "pexels" in providers:
+            try:
                 pexels_result = _search_pexels(
                     query=query,
                     media_type=media_type,
@@ -604,7 +809,11 @@ def create_app(workspace_root: Path, timeline_path: Path):
                 )
                 items.extend(pexels_result.get("items", []))
                 has_more = has_more or bool(pexels_result.get("has_more", False))
-            if "pixabay" in providers:
+            except Exception as exc:
+                warnings.append(f"pexels: {exc}")
+
+        if "pixabay" in providers:
+            try:
                 pixabay_result = _search_pixabay(
                     query=query,
                     media_type=media_type,
@@ -616,140 +825,228 @@ def create_app(workspace_root: Path, timeline_path: Path):
                 )
                 items.extend(pixabay_result.get("items", []))
                 has_more = has_more or bool(pixabay_result.get("has_more", False))
-        except Exception as exc:
-            return Response(f"Search failed: {exc}", status=502)
+            except Exception as exc:
+                warnings.append(f"pixabay: {exc}")
 
-        return jsonify({"items": items[:120], "page": page, "per_page": per_page, "has_more": has_more})
+        if not items and warnings:
+            return Response("Search failed: " + " | ".join(warnings), status=502)
+
+        return jsonify({"items": items[:120], "page": page, "per_page": per_page, "has_more": has_more, "warnings": warnings})
 
     @app.post("/api/media/import")
     def api_media_import():
-        payload = request.get_json(force=True, silent=False)
-        item = payload.get("item", {}) or {}
-        url = str(item.get("download_url", "")).strip()
-        media_type = str(item.get("media_type", "video")).strip().lower()
-        if not url:
-            return Response("download_url required", status=400)
-
-        media_id = str(item.get("id") or uuid.uuid4())
-        if media_type == "image":
-            image_seconds = max(1.0, float(payload.get("image_seconds", 5.0)))
-            img_path = clips_dir / f"img_{media_id}.jpg"
-            rr = requests.get(url, timeout=60)
-            rr.raise_for_status()
-            img_path.write_bytes(rr.content)
-
-            clip_path = clips_dir / f"img_{media_id}.mp4"
-            subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-loop",
-                    "1",
-                    "-t",
-                    f"{image_seconds:.2f}",
-                    "-i",
-                    str(img_path),
-                    "-vf",
-                    "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=30,format=yuv420p",
-                    "-c:v",
-                    "libx264",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-r",
-                    "30",
-                    str(clip_path),
-                ],
-                check=True,
-            )
-        else:
-            clip_path = clips_dir / f"clip_{media_id}.mp4"
-            rr = requests.get(url, timeout=90)
-            rr.raise_for_status()
-            clip_path.write_bytes(rr.content)
-
-        clip_duration = 0.0
+        import traceback
         try:
-            clip_duration = float(probe_duration_seconds(clip_path))
-        except Exception:
-            pass
+            payload = request.get_json(force=True, silent=False) or {}
+            item = payload.get("item") or {}
+            add_to_timeline = bool(payload.get("add_to_timeline", False))
+            image_seconds = max(1.0, float(payload.get("image_seconds", 6)))
+            media_type = str(item.get("media_type", "video")).lower().strip()
 
-        data = load_timeline(timeline_path)
-        data.setdefault("library", []).append(
-            {
-                "id": str(uuid.uuid4()),
-                "path": str(clip_path.resolve()),
-                "name": clip_path.name,
-                "duration": round(clip_duration, 3),
-            }
-        )
+            source_url = (
+                item.get("download_url")
+                or item.get("source_url")
+                or item.get("video_url")
+                or item.get("image_url")
+                or item.get("url")
+            )
+            if not source_url:
+                return Response(f"missing source URL. Keys: {list(item.keys())}", status=400)
 
-        if bool(payload.get("add_to_timeline", True)):
-            data.setdefault("segments", []).append(
-                {
+            clips_dir = workspace_root / "work" / "clips"
+            clips_dir.mkdir(parents=True, exist_ok=True)
+
+            parsed = urlparse(str(source_url))
+            ext = Path(parsed.path).suffix.lower()
+            if ext not in {".mp4", ".mov", ".mkv", ".webm", ".jpg", ".jpeg", ".png"}:
+                ext = ".mp4" if media_type == "video" else ".jpg"
+
+            base_id = str(item.get("id") or uuid.uuid4())
+            safe_id = "".join(c for c in base_id if c.isalnum() or c in "-_")[:60]
+            clip_path = (clips_dir / f"clip_{safe_id}{ext}").resolve()
+
+            # Descargar solo si no existe ya
+            if not clip_path.exists() or clip_path.stat().st_size < 1024:
+                r = requests.get(str(source_url), timeout=90, stream=True,
+                                 headers={"User-Agent": "Mozilla/5.0"})
+                r.raise_for_status()
+                with open(clip_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=1024 * 256):
+                        if chunk:
+                            f.write(chunk)
+
+            if clip_path.stat().st_size < 1024:
+                clip_path.unlink(missing_ok=True)
+                return Response("downloaded file too small", status=502)
+
+            # Duración
+            if media_type == "image":
+                clip_duration = float(image_seconds)
+            else:
+                try:
+                    clip_duration = float(item.get("duration") or 0)
+                except Exception:
+                    clip_duration = 0.0
+                if clip_duration <= 0:
+                    try:
+                        clip_duration = float(probe_duration_seconds(clip_path))
+                    except Exception:
+                        clip_duration = 4.0
+
+            clip_duration = max(1.0, round(float(clip_duration), 3))
+
+            data = load_timeline(timeline_path)
+
+            created_clip = None
+            if add_to_timeline:
+                created_clip = {
                     "id": str(uuid.uuid4()),
                     "name": clip_path.name,
-                    "clip_path": str(clip_path.resolve()),
+                    # ── CLAVE UNIFICADA: usar "path" igual que _to_editor_payload ──
+                    "path": str(clip_path),
+                    "clip_path": str(clip_path),
                     "start": 0.0,
-                    "duration": max(1.0, min(6.0, clip_duration if clip_duration > 0 else 6.0)),
+                    "duration": clip_duration,
                     "enabled": True,
                 }
-            )
+                # ── Añadir solo a "clips", NO a "segments" ──
+                data.setdefault("clips", []).append(created_clip)
+                data["audio_dirty"] = True
+                save_timeline(timeline_path, data)
 
-        save_timeline(timeline_path, data)
-        return jsonify({"ok": True, "path": str(clip_path.resolve())})
+            return jsonify({
+                "ok": True,
+                "path": str(clip_path),
+                "clip": {
+                    "id": created_clip["id"],
+                    "name": created_clip["name"],
+                    "path": created_clip["path"],
+                    "start": created_clip["start"],
+                    "duration": created_clip["duration"],
+                    "enabled": created_clip["enabled"],
+                } if created_clip else None,
+            })
+
+        except requests.RequestException as exc:
+            traceback.print_exc()
+            return Response(f"download failed: {exc}", status=502)
+        except Exception as exc:
+            traceback.print_exc()
+            return Response(f"media import failed: {type(exc).__name__}: {exc}", status=500)
+
+    @app.post("/api/script/generate")
+    def api_script_generate():
+        payload = request.get_json(force=True, silent=False)
+        try:
+            return jsonify(_generate_script_only(payload))
+        except ValueError as exc:
+            return Response(str(exc), status=400)
+        except Exception as exc:
+            return Response(f"Script generation failed: {exc}", status=500)
+
+    @app.post("/api/audio/generate")
+    def api_audio_generate():
+        payload = request.get_json(force=True, silent=False)
+        try:
+            return jsonify(_generate_audio_only(payload))
+        except ValueError as exc:
+            return Response(str(exc), status=400)
+        except Exception as exc:
+            return Response(f"Audio generation failed: {exc}", status=500)
+
+    @app.post("/api/subtitles/generate")
+    def api_subtitles_generate():
+        payload = request.get_json(force=True, silent=False)
+        try:
+            return jsonify(_generate_subtitles_only(payload))
+        except ValueError as exc:
+            return Response(str(exc), status=400)
+        except Exception as exc:
+            return Response(f"Subtitles generation failed: {exc}", status=500)
 
     @app.post("/api/project/generate")
     def api_project_generate():
         payload = request.get_json(force=True, silent=False)
-        topic = str(payload.get("topic", "")).strip()
+        try:
+            return jsonify(_generate_audio_bundle(payload))
+        except ValueError as exc:
+            return Response(str(exc), status=400)
+        except Exception as exc:
+            return Response(f"Project generation failed: {exc}", status=500)
+
+    def _generate_audio_bundle(payload: dict) -> dict:
+        # Si el cliente manda el timeline actual, persistirlo antes de calcular audio
+        if any(k in payload for k in ("clips", "library", "overlays", "subtitle_style", "script_text")):
+            _save_from_editor(payload)
+
+        current = load_timeline(timeline_path)
+
+        topic = str(payload.get("topic", current.get("topic", ""))).strip()
         if not topic:
-            return Response("topic is required", status=400)
+            raise ValueError("topic is required")
 
-        minutes = float(payload.get("minutes", 8.0))
-        script_provider = str(payload.get("script_provider", "auto"))
-        tts_provider = str(payload.get("tts_provider", "gtts"))
-        voice = str(payload.get("voice", "en-US-EmmaNeural"))
-        speech_rate = str(payload.get("speech_rate", "+0%"))
+        requested_minutes = float(payload.get("minutes", current.get("target_minutes", 8.0) or 8.0))
+        timeline_seconds = _enabled_timeline_seconds(current)
 
-        script_text = generate_script(
-            topic=topic,
-            target_minutes=int(max(1, round(minutes))),
-            ollama_base_url=settings.OLLAMA_BASE_URL,
-            ollama_model=settings.OLLAMA_MODEL,
-            openai_api_key=settings.OPENAI_API_KEY,
-            openai_model=settings.OPENAI_MODEL,
-            provider=script_provider,
-        )
+        if timeline_seconds <= 0:
+            raise ValueError("Añade clips al timeline antes de generar audio")
 
-        script_path = out_dir / "script.txt"
-        script_path.write_text(script_text, encoding="utf-8")
+        effective_minutes = max(1.0, timeline_seconds / 60.0)
 
+        script_text = str(payload.get("script_text", "")).strip()
+        script_provider = str(payload.get("script_provider", "auto")).strip() or "auto"
+        tts_provider = str(payload.get("tts_provider", "gtts")).strip() or "gtts"
+        voice = str(payload.get("voice", "en")).strip() or "en"
+        speech_rate = str(payload.get("speech_rate", "+0%")).strip() or "+0%"
+
+        if not script_text:
+            script_text = generate_script(
+                topic=topic,
+                target_minutes=max(1, int(round(effective_minutes))),
+                ollama_base_url=settings.OLLAMA_BASE_URL,
+                ollama_model=settings.OLLAMA_MODEL,
+                openai_api_key=settings.OPENAI_API_KEY,
+                openai_model=settings.OPENAI_MODEL,
+                provider=script_provider,
+            )
+
+        script_path = _write_script_text(script_text)
         voice_path = _create_voice_from_text(script_text, tts_provider, voice, speech_rate)
+
         srt_path = out_dir / "subtitles.srt"
         whisper_to_srt(audio_path=voice_path, srt_path=srt_path)
 
-        # NO recrear timeline con segmentos automáticos.
-        current = load_timeline(timeline_path)
         current["topic"] = topic
-        current["target_minutes"] = float(minutes)
-        current["desired_seconds"] = float(max(0.0, minutes * 60.0))
+        current["target_minutes"] = float(requested_minutes)
+        current["desired_seconds"] = float(timeline_seconds)
+        current["script_text"] = script_text
         current["voice_path"] = str(Path(voice_path).resolve())
         current["srt_path"] = str(Path(srt_path).resolve())
-        current["out_path"] = str(Path(current.get("out_path") or (out_dir / "final.mp4")).resolve())
+        current["audio_dirty"] = False
+
         current.setdefault("library", [])
         current.setdefault("segments", [])
         current.setdefault("overlays", [])
+        current.setdefault("subtitle_style", {
+            "font_family": "Arial",
+            "font_file": "",
+            "font_size": 18,
+            "primary_color": "&H00FFFFFF",
+            "outline_color": "&H00000000",
+            "outline": 2,
+        })
+
         save_timeline(timeline_path, current)
 
-        return jsonify(
-            {
-                "ok": True,
-                "topic": topic,
-                "script_path": str(script_path),
-                "voice_path": str(voice_path),
-                "srt_path": str(srt_path),
-            }
-        )
+        return {
+            "ok": True,
+            "topic": topic,
+            "script_path": str(script_path),
+            "voice_path": str(Path(voice_path).resolve()),
+            "srt_path": str(Path(srt_path).resolve()),
+            "script_text": script_text,
+            "timeline_seconds": float(timeline_seconds),
+        }
 
     @app.get("/api/fonts/local")
     def api_fonts_local():

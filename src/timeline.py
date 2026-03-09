@@ -72,6 +72,8 @@ def create_timeline_manifest(
         "srt_path": str(Path(srt_path).resolve()),
         "out_path": str(Path(out_path).resolve()),
         "desired_seconds": round(desired_seconds, 3),
+        "script_text": "",
+        "audio_dirty": False,
         "max_clip_segment_seconds": float(max_clip_segment_seconds),
         "subtitle_style": {
             "font_family": "Arial",
@@ -90,7 +92,9 @@ def create_timeline_manifest(
 
 
 def load_timeline(timeline_path: Path):
-    data = json.loads(Path(timeline_path).read_text(encoding="utf-8"))
+    timeline_path = Path(timeline_path)
+    data = json.loads(timeline_path.read_text(encoding="utf-8"))
+    changed = False
 
     data.setdefault(
         "subtitle_style",
@@ -122,6 +126,7 @@ def load_timeline(timeline_path: Path):
                 }
             )
         data["library"] = upgraded_library
+        changed = True
 
     upgraded_segments = []
     for seg in data.get("segments", []):
@@ -137,6 +142,25 @@ def load_timeline(timeline_path: Path):
             }
         )
     data["segments"] = upgraded_segments
+
+    # Migra timelines heredados donde la duración de segmentos quedó capada a 6.0s
+    # al importar media, usando la duración real existente en biblioteca para ese clip.
+    max_cap = float(data.get("max_clip_segment_seconds", 6.0) or 6.0)
+    lib_duration_by_path = {
+        str(item.get("path", "")): float(item.get("duration", 0.0) or 0.0)
+        for item in data.get("library", [])
+        if isinstance(item, dict)
+    }
+    for seg in data.get("segments", []):
+        seg_path = str(seg.get("clip_path", ""))
+        seg_duration = float(seg.get("duration", 0.0) or 0.0)
+        seg_start = float(seg.get("start", 0.0) or 0.0)
+        lib_duration = float(lib_duration_by_path.get(seg_path, 0.0) or 0.0)
+
+        is_legacy_capped = seg_start == 0.0 and abs(seg_duration - max_cap) < 1e-6 and lib_duration > seg_duration
+        if is_legacy_capped:
+            seg["duration"] = round(max(1.0, lib_duration), 3)
+            changed = True
 
     upgraded_overlays = []
     for ov in data.get("overlays", []):
@@ -160,6 +184,12 @@ def load_timeline(timeline_path: Path):
             }
         )
     data["overlays"] = upgraded_overlays
+    data.setdefault("script_text", "")
+    data.setdefault("audio_dirty", False)
+
+    if changed:
+        timeline_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
     return data
 
 

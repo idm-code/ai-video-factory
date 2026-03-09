@@ -47,3 +47,7 @@ work/clips/
 work/tmp/
 work/timeline.json
 *.log
+
+# Frontend build artifacts
+web/node_modules/
+web/dist/
