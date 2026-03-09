@@ -761,7 +761,14 @@ def create_app(workspace_root: Path, timeline_path: Path):
         clip = Path(request.args.get("path", "")).resolve()
         if not _is_inside(workspace_root, clip) or not clip.exists():
             return Response("Not found", status=404)
-        return Response(clip.read_bytes(), mimetype="video/mp4")
+        ext = clip.suffix.lower()
+        mime_map = {
+            ".mp4": "video/mp4", ".mov": "video/quicktime", ".mkv": "video/x-matroska",
+            ".webm": "video/webm", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp",
+        }
+        mime = mime_map.get(ext, "application/octet-stream")
+        return Response(clip.read_bytes(), mimetype=mime)
 
     @app.post("/api/add")
     def api_add():
