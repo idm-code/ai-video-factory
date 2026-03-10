@@ -200,3 +200,23 @@ button {
   border-radius: 6px;
   cursor: pointer;
 }
+
+/* Reset selects para que hereden los estilos del tema */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: #0d0f12;
+  border: 1px solid #252b38;
+  color: #e7ecf5;
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-size: 12px;
+  width: 100%;
+  outline: none;
+  cursor: pointer;
+}
+
+select option {
+  background-color: #13161c;
+  color: #e7ecf5;
+}
