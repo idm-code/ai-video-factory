@@ -1,19 +1,24 @@
 # AI Video Factory
 
-Pipeline automático para generar videos faceless:
+Editor y pipeline para montar vídeos con clips stock, voz generada, subtítulos y render final con FFmpeg.
 
-1. Genera guion (`GPT`/`Ollama`/fallback local)
-2. Genera voz (`Edge-TTS`/`ElevenLabs`/local)
-3. Descarga clips de Pexels
-4. Crea subtítulos con Whisper
-5. Renderiza video final con FFmpeg (CFR 30fps)
+## Estado actual
+
+- La UI activa es **React**.
+- Flask sirve la build de React en `/`.
+- El editor legado HTML ya no forma parte del proyecto.
+- El modo por defecto abre la UI web.
+- El modo `--batch` ejecuta el pipeline automático completo desde CLI.
 
 ## Requisitos
 
 - Python 3.9+
+- Node.js 18+
 - FFmpeg y FFprobe en `PATH`
 
 ## Instalación
+
+### Backend
 
 ```bash
 python -m venv .venv
@@ -21,18 +26,24 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+### Frontend React
+
+```bash
+npm --prefix web install
+npm --prefix web run build
+```
+
 ## Variables `.env`
 
 ```env
-PEXELS_API_KEY=...
+PEXELS_API_KEY=
+PIXABAY_API_KEY=
 
-# Script generation
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=llama3.1
 
-# ElevenLabs (opcional)
 ELEVENLABS_API_KEY=
 ELEVENLABS_VOICE_ID=
 ELEVENLABS_MODEL=eleven_multilingual_v2
@@ -40,45 +51,52 @@ ELEVENLABS_MODEL=eleven_multilingual_v2
 
 ## Uso recomendado
 
-```bash
-python generate_video.py "AI wedding templates on Etsy" --minutes 8 --clips 20 --script-provider auto --tts-provider gtts --voice en
-```
-
-## Edición manual de clips (web)
-
-Si quieres revisar y limpiar clips incongruentes antes del render final:
-
-```bash
-python generate_video.py "AI wedding templates on Etsy" --minutes 8 --clips 20 --edit-ui
-```
-
-Esto genera `work/timeline.json` y abre un editor web local donde puedes:
-
-- eliminar clips,
-- desactivar/activar segmentos,
-- ajustar `start` y `duration`,
-- añadir clips de la librería descargada,
-- renderizar el `output/final.mp4` con tu selección.
-
-## Proveedores
-
-- `--script-provider auto|gpt|ollama`
-	- `auto`: usa GPT si hay `OPENAI_API_KEY`; si falla, Ollama; si falla, fallback local.
-- `--tts-provider gtts|edge|elevenlabs|local`
-	- `gtts`: calidad buena y estable (recomendado por defecto).
-	- `edge`: calidad alta, puede fallar según región/bloqueo de servicio.
-	- `elevenlabs`: requiere cuota y API key.
-	- `local`: fallback offline con voces del sistema.
-
-## UI / despliegue (único)
-
-La app web se sirve directamente desde Flask usando [web/editor.html](web/editor.html) vía [`create_app`](src/editor_web.py).  
-No se usa build de Vite para producción local.
-
-Inicio recomendado:
+Arranca la UI React local:
 
 ```bash
 python generate_video.py "tu temática" --minutes 8
 ```
 
-Esto abre el editor local y todo el flujo se hace desde ahí.
+Esto:
+
+1. prepara o recupera `work/timeline.json`,
+2. abre la app web en `http://127.0.0.1:8765/`,
+3. permite buscar clips, añadirlos al timeline, generar audio, generar subtítulos y renderizar.
+
+## Flujo en la UI
+
+1. Buscar clips/imágenes.
+2. Añadir clips al timeline.
+3. Editar `start` y `duration`.
+4. Pulsar **Generar audio**.
+5. Pulsar **Generar subs**.
+6. Pulsar **Render video**.
+
+## Modo batch
+
+Para ejecutar el pipeline automático completo sin abrir la UI:
+
+```bash
+python generate_video.py "tu temática" --minutes 8 --batch
+```
+
+## Estructura relevante
+
+- [`generate_video.py`](generate_video.py): entrada CLI
+- [`src/editor_web.py`](src/editor_web.py): servidor Flask + API
+- [`src/video_edit.py`](src/video_edit.py): render final con FFmpeg
+- [`src/timeline.py`](src/timeline.py): carga y persistencia del timeline
+- [`web/src/App.jsx`](web/src/App.jsx): app React principal
+- [`web/src/api.js`](web/src/api.js): cliente HTTP del frontend
+
+## Notas
+
+- Si la UI devuelve `React build not found`, ejecutar:
+
+```bash
+npm --prefix web install
+npm --prefix web run build
+```
+
+- Los clips del timeline son la fuente de verdad visual para el render.
+- Si cambias clips o duraciones, regenera audio/subtítulos antes de renderizar.

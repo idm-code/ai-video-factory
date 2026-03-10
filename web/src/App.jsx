@@ -1,5 +1,5 @@
 ﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { generateAudio, generateSubtitles, importMediaToTimeline } from './api';
+import { generateAudio, generateSubtitles, importMediaToTimeline, renderFinal } from './api';
 import { S } from './constants/theme';
 import { useTimeline } from './hooks/useTimeline';
 import { useSearch } from './hooks/useSearch';
@@ -84,14 +84,18 @@ export default function App() {
   }
 
   async function onRender() {
-    setBusy(true); toast('Renderizando...');
+    setBusy(true);
+    toast('Renderizando...');
     try {
       await tl.save();
-      const res = await fetch('/api/render', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
-      if (!res.ok) throw new Error(await res.text());
-      await tl.reload(); toast('¡Render completado ✓!', 'ok');
-    } catch (e) { toast(`Error render: ${e.message}`, 'err'); }
-    finally { setBusy(false); }
+      await renderFinal();
+      await tl.reload();
+      toast('¡Render completado ✓!', 'ok');
+    } catch (e) {
+      toast(`Error render: ${e.message}`, 'err');
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
