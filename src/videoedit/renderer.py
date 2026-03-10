@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 from ..utils import probe_duration_seconds
-from .common import VIDEO_FILTER, run_command
+from .common import VIDEO_FILTER, is_image_path, run_command
 from .filters import overlay_filters, resolve_overlays, subtitle_filter
 
 UsedSegment = Tuple[Path, float, float, str]
@@ -30,23 +30,45 @@ def render_segments(used_segments, out_path: Path) -> List[Path]:
     seg_dir = out_path.parent / "tmp_segments"
     seg_dir.mkdir(parents=True, exist_ok=True)
     normalized_segments = []
+
     for idx, (clip, segment_seconds, start_at, _seg_id) in enumerate(used_segments):
         seg_path = seg_dir / f"seg_{idx:04d}.mp4"
-        run_command(
-            [
-                "ffmpeg", "-y",
-                "-ss", f"{start_at:.3f}",
-                "-t", f"{segment_seconds:.3f}",
-                "-i", str(clip),
-                "-an",
-                "-vf", VIDEO_FILTER,
-                "-c:v", "libx264", "-preset", "fast", "-crf", "22",
-                "-g", "60", "-keyint_min", "60", "-sc_threshold", "0",
-                "-pix_fmt", "yuv420p",
-                str(seg_path),
-            ]
-        )
+
+        if is_image_path(clip):
+            run_command(
+                [
+                    "ffmpeg", "-y",
+                    "-loop", "1",
+                    "-t", f"{segment_seconds:.3f}",
+                    "-i", str(clip),
+                    "-an",
+                    "-vf", VIDEO_FILTER,
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+                    "-g", "60", "-keyint_min", "60", "-sc_threshold", "0",
+                    "-pix_fmt", "yuv420p",
+                    "-r", "30",
+                    str(seg_path),
+                ]
+            )
+        else:
+            run_command(
+                [
+                    "ffmpeg", "-y",
+                    "-ss", f"{start_at:.3f}",
+                    "-t", f"{segment_seconds:.3f}",
+                    "-i", str(clip),
+                    "-an",
+                    "-vf", VIDEO_FILTER,
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+                    "-g", "60", "-keyint_min", "60", "-sc_threshold", "0",
+                    "-pix_fmt", "yuv420p",
+                    "-r", "30",
+                    str(seg_path),
+                ]
+            )
+
         normalized_segments.append(seg_path)
+
     return normalized_segments
 
 
