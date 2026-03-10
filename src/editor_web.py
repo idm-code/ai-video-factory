@@ -3,6 +3,7 @@ import subprocess
 import uuid
 import webbrowser
 from pathlib import Path
+from typing import Optional
 from urllib.parse import quote, urlparse
 
 import requests
@@ -44,6 +45,22 @@ def create_app(workspace_root: Path, timeline_path: Path):
     web_dist = workspace_root / "web" / "dist"
 
     app = Flask(__name__)
+
+    def _clip_signature(items: list[dict]) -> list[tuple]:
+        sig = []
+        for clip in items or []:
+            clip_path = str(clip.get("clip_path") or clip.get("path") or "")
+            sig.append(
+                (
+                    str(clip.get("id") or ""),
+                    str(clip.get("name") or Path(clip_path).name),
+                    clip_path,
+                    round(float(clip.get("start", 0.0) or 0.0), 3),
+                    round(float(clip.get("duration", 4.0) or 4.0), 3),
+                    bool(clip.get("enabled", True)),
+                )
+            )
+        return sig
 
     def _load_fonts_index() -> dict:
         if not fonts_index_path.exists():
@@ -454,115 +471,38 @@ def create_app(workspace_root: Path, timeline_path: Path):
     def _save_from_editor(payload: dict) -> dict:
         data = load_timeline(timeline_path)
 
-        old_segments = data.get("segments", []) or []
-        cleaned_clips = old_segments
+        old_segments = [
+            {
+                "id": seg.get("id") or str(uuid.uuid4()),
+                "name": seg.get("name") or Path(str(seg.get("clip_path", ""))).name,
+                "clip_path": str(seg.get("clip_path", "")),
+                "start": max(0.0, float(seg.get("start", 0.0))),
+                "duration": max(1.0, float(seg.get("duration", 4.0))),
+                "enabled": bool(seg.get("enabled", True)),
+            }
+            for seg in (data.get("segments", []) or [])
+        ]
 
+        cleaned_clips = old_segments
         has_clips = "clips" in payload
+
         if has_clips:
             cleaned_clips = []
             for clip in payload.get("clips", []):
-                clip_path = Path(clip.get("path", "")).resolve()
-                if not _is_inside(workspace_root, clip_path):
-                    continue
-                cleaned_clips.append(
-                    {
-                        "id": clip.get("id"),
-                        "name": clip.get("name") or clip_path.name,
-                        "clip_path": str(clip_path),
-                        "start": max(0.0, float(clip.get("start", 0.0))),
-                        "duration": max(1.0, float(clip.get("duration", 4.0))),
-                        "enabled": bool(clip.get("enabled", True)),
-                    }
-                )
+                normalized = _normalize_editor_clip(clip)
+                if normalized:
+                    cleaned_clips.append(normalized)
 
-        def _clip_sig(seg: dict) -> tuple:
-            p = str(Path(str(seg.get("clip_path", ""))).resolve()).lower()
-            return (
-                p,
-                round(float(seg.get("start", 0.0) or 0.0), 3),
-                round(float(seg.get("duration", 4.0) or 4.0), 3),
-                bool(seg.get("enabled", True)),
-            )
-
-        clips_changed = has_clips and ([_clip_sig(s) for s in old_segments] != [_clip_sig(s) for s in cleaned_clips])
-
-        if has_clips:
             data["segments"] = cleaned_clips
+            data["clips"] = []
+            data["editor_touched"] = True
 
-        if "library" in payload:
-            library = []
-            for item in payload.get("library", []):
-                p = Path(item.get("path", "")).resolve() if isinstance(item, dict) else Path(str(item)).resolve()
-                if not _is_inside(workspace_root, p):
-                    continue
-                library.append(
-                    {
-                        "id": item.get("id") if isinstance(item, dict) else None,
-                        "path": str(p),
-                        "name": item.get("name") if isinstance(item, dict) and item.get("name") else p.name,
-                        "duration": float(item.get("duration", 0.0)) if isinstance(item, dict) else 0.0,
-                    }
-                )
-            data["library"] = library
-
+        clips_changed = _clip_signature(old_segments) != _clip_signature(cleaned_clips)
         if clips_changed:
             data["audio_dirty"] = True
 
-        style = payload.get("subtitle_style", data.get("subtitle_style", {}))
-        data["subtitle_style"] = {
-            "font_family": str(style.get("font_family", "Arial")),
-            "font_file": str(style.get("font_file", "")),
-            "font_size": int(style.get("font_size", 18)),
-            "primary_color": str(style.get("primary_color", "&H00FFFFFF")),
-            "outline_color": str(style.get("outline_color", "&H00000000")),
-            "outline": int(style.get("outline", 2)),
-        }
-
-        overlays = []
-        valid_clip_ids = {c.get("id") for c in cleaned_clips}
-        for ov in payload.get("overlays", data.get("overlays", [])):
-            text = str(ov.get("text", "")).strip()
-            if not text:
-                continue
-
-            clip_id = ov.get("clip_id")
-            if clip_id and clip_id not in valid_clip_ids:
-                continue
-
-            start = float(ov.get("start", 0.0))
-            end = float(ov.get("end", 0.0))
-            if end <= start:
-                continue
-
-            overlays.append(
-                {
-                    "id": ov.get("id"),
-                    "clip_id": clip_id,
-                    "text": text,
-                    "start": max(0.0, start),
-                    "end": max(0.01, end),
-                    "x": str(ov.get("x", "(w-text_w)/2")),
-                    "y": str(ov.get("y", "h-160")),
-                    "font_size": int(ov.get("font_size", 44)),
-                    "font_color": str(ov.get("font_color", "white")),
-                    "box": int(ov.get("box", 1)),
-                    "box_color": str(ov.get("box_color", "black@0.45")),
-                    "relative": bool(ov.get("relative", False)),
-                }
-            )
-
-        data["overlays"] = overlays
-
         if "script_text" in payload:
-            incoming_script = str(payload.get("script_text", "") or "")
-            if incoming_script != str(data.get("script_text", "") or ""):
-                data["script_text"] = incoming_script
-                _write_script_text(incoming_script)
-                data["audio_dirty"] = True
-
-        # Marca que el timeline fue editado desde la UI (para distinguirlo de
-        # timelines autogenerados por el modo batch).
-        data["editor_touched"] = True
+            data["script_text"] = str(payload.get("script_text", "") or "")
 
         save_timeline(timeline_path, data)
         return data
@@ -683,6 +623,50 @@ def create_app(workspace_root: Path, timeline_path: Path):
         script_path.write_text(text, encoding="utf-8")
         return script_path
 
+    def _is_image_file(path: Path) -> bool:
+        return path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+
+    def _actual_media_duration(path: Path, fallback: float = 0.0) -> float:
+        path = Path(path)
+        if _is_image_file(path):
+            return max(1.0, float(fallback or 6.0))
+        try:
+            probed = float(probe_duration_seconds(path))
+            if probed > 0.05:
+                return probed
+        except Exception:
+            pass
+        return max(0.0, float(fallback or 0.0))
+
+    def _normalize_editor_clip(raw: dict) -> Optional[dict]:
+        clip_path = Path(str(raw.get("path") or raw.get("clip_path") or "")).resolve()
+        if not clip_path.exists() or not _is_inside(workspace_root, clip_path):
+            return None
+
+        req_start = max(0.0, float(raw.get("start", 0.0) or 0.0))
+        req_duration = max(1.0, float(raw.get("duration", 4.0) or 4.0))
+
+        if _is_image_file(clip_path):
+            start = 0.0
+            duration = req_duration
+        else:
+            real_duration = _actual_media_duration(clip_path, req_duration)
+            if real_duration <= 0.05:
+                real_duration = req_duration
+
+            start = min(req_start, max(0.0, real_duration - 0.05))
+            available = max(0.05, real_duration - start)
+            duration = min(req_duration, max(1.0, available))
+
+        return {
+            "id": raw.get("id") or str(uuid.uuid4()),
+            "name": raw.get("name") or clip_path.name,
+            "clip_path": str(clip_path),
+            "start": round(float(start), 3),
+            "duration": round(float(duration), 3),
+            "enabled": bool(raw.get("enabled", True)),
+        }
+
     @app.get("/")
     def index():
         html_path = workspace_root / "web" / "editor.html"
@@ -716,32 +700,30 @@ def create_app(workspace_root: Path, timeline_path: Path):
     def api_timeline():
         data = load_timeline(timeline_path)
         clips = []
-        for seg in data.get("segments", []) + data.get("clips", []):
-            clips.append({
-                "id": seg.get("id") or str(uuid.uuid4()),
-                "name": seg.get("name") or Path(str(seg.get("clip_path", seg.get("path", "")))).name,
-                "path": str(seg.get("path") or seg.get("clip_path", "")),
-                "start": float(seg.get("start", 0.0)),
-                "duration": float(seg.get("duration", 4.0)),
-                "enabled": bool(seg.get("enabled", True)),
-            })
-        # Deduplicar por id
-        seen = set()
-        unique_clips = []
-        for c in clips:
-            if c["id"] not in seen:
-                seen.add(c["id"])
-                unique_clips.append(c)
-        return jsonify({
-            "clips": unique_clips,
-            "script_text": data.get("script_text", ""),
-            "target_minutes": data.get("target_minutes", 8),
-            "topic": data.get("topic", ""),
-            "voice_path": data.get("voice_path", ""),
-            "srt_path": data.get("srt_path", ""),
-            "audio": {"name": Path(data["voice_path"]).name} if data.get("voice_path") and Path(data["voice_path"]).exists() else None,
-            "subtitles": {"name": Path(data["srt_path"]).name} if data.get("srt_path") and Path(data["srt_path"]).exists() else None,
-        })
+        for seg in data.get("segments", []):
+            clips.append(
+                {
+                    "id": seg.get("id") or str(uuid.uuid4()),
+                    "name": seg.get("name") or Path(str(seg.get("clip_path", ""))).name,
+                    "path": str(seg.get("clip_path", "")),
+                    "start": float(seg.get("start", 0.0)),
+                    "duration": float(seg.get("duration", 4.0)),
+                    "enabled": bool(seg.get("enabled", True)),
+                }
+            )
+
+        return jsonify(
+            {
+                "clips": clips,
+                "script_text": data.get("script_text", ""),
+                "target_minutes": data.get("target_minutes", 8),
+                "topic": data.get("topic", ""),
+                "voice_path": data.get("voice_path", ""),
+                "srt_path": data.get("srt_path", ""),
+                "audio": {"name": Path(data["voice_path"]).name} if data.get("voice_path") and Path(data["voice_path"]).exists() else None,
+                "subtitles": {"name": Path(data["srt_path"]).name} if data.get("srt_path") and Path(data["srt_path"]).exists() else None,
+            }
+        )
 
     @app.post("/api/timeline")
     @app.put("/api/timeline")
@@ -920,17 +902,17 @@ def create_app(workspace_root: Path, timeline_path: Path):
 
             # Duración
             if media_type == "image":
-                clip_duration = float(image_seconds)
+                clip_duration = max(1.0, float(image_seconds))
             else:
+                fallback_duration = 0.0
                 try:
-                    clip_duration = float(item.get("duration") or 0)
+                    fallback_duration = float(item.get("duration") or 0.0)
                 except Exception:
-                    clip_duration = 0.0
+                    fallback_duration = 0.0
+
+                clip_duration = _actual_media_duration(clip_path, fallback_duration)
                 if clip_duration <= 0:
-                    try:
-                        clip_duration = float(probe_duration_seconds(clip_path))
-                    except Exception:
-                        clip_duration = 4.0
+                    clip_duration = max(1.0, fallback_duration or 4.0)
 
             clip_duration = max(1.0, round(float(clip_duration), 3))
 
@@ -941,30 +923,31 @@ def create_app(workspace_root: Path, timeline_path: Path):
                 created_clip = {
                     "id": str(uuid.uuid4()),
                     "name": clip_path.name,
-                    # ── CLAVE UNIFICADA: usar "path" igual que _to_editor_payload ──
-                    "path": str(clip_path),
                     "clip_path": str(clip_path),
                     "start": 0.0,
                     "duration": clip_duration,
                     "enabled": True,
                 }
-                # ── Añadir solo a "clips", NO a "segments" ──
-                data.setdefault("clips", []).append(created_clip)
+                data.setdefault("segments", []).append(created_clip)
+                data["clips"] = []
+                data["editor_touched"] = True
                 data["audio_dirty"] = True
                 save_timeline(timeline_path, data)
 
-            return jsonify({
-                "ok": True,
-                "path": str(clip_path),
-                "clip": {
-                    "id": created_clip["id"],
-                    "name": created_clip["name"],
-                    "path": created_clip["path"],
-                    "start": created_clip["start"],
-                    "duration": created_clip["duration"],
-                    "enabled": created_clip["enabled"],
-                } if created_clip else None,
-            })
+            return jsonify(
+                {
+                    "ok": True,
+                    "path": str(clip_path),
+                    "clip": {
+                        "id": created_clip["id"],
+                        "name": created_clip["name"],
+                        "path": created_clip["clip_path"],
+                        "start": created_clip["start"],
+                        "duration": created_clip["duration"],
+                        "enabled": created_clip["enabled"],
+                    } if created_clip else None,
+                }
+            )
 
         except requests.RequestException as exc:
             traceback.print_exc()

@@ -5,6 +5,8 @@ from pathlib import Path
 from .utils import probe_duration_seconds
 from typing import Optional, List, Dict, Any
 
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+
 def _run(cmd):
     subprocess.run(cmd, check=True)
 
@@ -154,7 +156,20 @@ def build_video(
         str(norm_voice),
     ])
     audio_seconds = probe_duration_seconds(norm_voice)
-    desired_seconds = max(target_seconds, audio_seconds)
+
+    # En modo timeline manual, la duración del render debe venir del propio timeline,
+    # no de target_minutes. Eso evita bucles artificiales.
+    if timeline_segments:
+        desired_seconds = max(
+            1.0,
+            sum(
+                max(1.0, float(seg.get("duration", max_clip_segment_seconds)))
+                for seg in timeline_segments
+                if seg.get("enabled", True)
+            ),
+        )
+    else:
+        desired_seconds = max(target_seconds, audio_seconds)
 
     # Build segment plan until the desired timeline length is covered.
     used = []
@@ -162,21 +177,22 @@ def build_video(
         for seg in timeline_segments:
             if not seg.get("enabled", True):
                 continue
+
             clip = Path(seg["clip_path"])
-            segment_seconds = max(1.0, float(seg.get("duration", max_clip_segment_seconds)))
             start_at = max(0.0, float(seg.get("start", 0.0)))
+            segment_seconds = max(1.0, float(seg.get("duration", max_clip_segment_seconds)))
+
+            if clip.suffix.lower() not in IMAGE_EXTS:
+                real_duration = float(probe_duration_seconds(clip) or 0.0)
+                if real_duration > 0.05:
+                    start_at = min(start_at, max(0.0, real_duration - 0.05))
+                    available = max(0.05, real_duration - start_at)
+                    segment_seconds = min(segment_seconds, max(1.0, available))
+
             used.append((clip, segment_seconds, start_at, seg.get("id")))
 
         if not used:
             raise RuntimeError("Timeline has no enabled segments.")
-
-        acc = sum(item[1] for item in used)
-        i = 0
-        while acc < desired_seconds and used:
-            clip, segment_seconds, start_at, seg_id = used[i % len(used)]
-            used.append((clip, segment_seconds, start_at, seg_id))
-            acc += segment_seconds
-            i += 1
     else:
         acc = 0.0
         i = 0
@@ -215,6 +231,8 @@ def build_video(
             {
                 "id": seg_id,
                 "duration": float(segment_seconds),
+                "clip_path": str(clip),
+                "start": float(start_at),
                 "timeline_start": float(timeline_acc),
             }
         )
@@ -242,7 +260,10 @@ def build_video(
     ])
 
     video_seconds = probe_duration_seconds(tmp_video)
-    total_seconds = max(desired_seconds, video_seconds)
+
+    # En timeline manual, la duración final la manda el vídeo montado desde V1.
+    # Así no se alarga artificialmente por target_minutes.
+    total_seconds = video_seconds if timeline_segments else max(desired_seconds, video_seconds)
 
     # 3) mux video + audio
     tmp_av = out_path.parent / "tmp_av.mp4"
@@ -270,8 +291,7 @@ def build_video(
             "-map", "0:v:0", "-map", "0:a:0",
             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30", "-g", "60",
             "-preset", "medium", "-crf", "20",
-            "-c:a", "aac", "-b:a", "192k",
-            "-movflags", "+faststart",
+            "-c:a", "copy",
             str(out_path)
         ])
     else:

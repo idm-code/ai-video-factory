@@ -108,6 +108,8 @@ def load_timeline(timeline_path: Path):
         },
     )
     data.setdefault("overlays", [])
+    data.setdefault("editor_touched", False)
+    data.setdefault("clips", [])
 
     if data.get("library") and isinstance(data["library"][0], str):
         upgraded_library = []
@@ -130,7 +132,7 @@ def load_timeline(timeline_path: Path):
 
     upgraded_segments = []
     for seg in data.get("segments", []):
-        clip_path = str(seg.get("clip_path", ""))
+        clip_path = str(seg.get("clip_path", seg.get("path", "")))
         upgraded_segments.append(
             {
                 "id": seg.get("id") or str(uuid.uuid4()),
@@ -142,6 +144,32 @@ def load_timeline(timeline_path: Path):
             }
         )
     data["segments"] = upgraded_segments
+
+    # Campo legacy del editor React: clips.
+    # La fuente canónica debe ser siempre segments.
+    legacy_clips = data.get("clips", []) or []
+    if legacy_clips:
+        if not data["segments"] and not bool(data.get("editor_touched", False)):
+            migrated = []
+            for seg in legacy_clips:
+                clip_path = str(seg.get("clip_path") or seg.get("path") or "")
+                if not clip_path:
+                    continue
+                migrated.append(
+                    {
+                        "id": seg.get("id") or str(uuid.uuid4()),
+                        "name": seg.get("name") or Path(clip_path).name,
+                        "clip_path": clip_path,
+                        "start": float(seg.get("start", 0.0)),
+                        "duration": float(seg.get("duration", 4.0)),
+                        "enabled": bool(seg.get("enabled", True)),
+                    }
+                )
+            if migrated:
+                data["segments"] = migrated
+
+        data["clips"] = []
+        changed = True
 
     # Migra timelines heredados donde la duración de segmentos quedó capada a 6.0s
     # al importar media, usando la duración real existente en biblioteca para ese clip.

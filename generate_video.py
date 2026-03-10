@@ -33,8 +33,10 @@ def _empty_timeline(out_final: Path) -> dict:
             "outline": 2,
         },
         "audio_dirty": False,
+        "editor_touched": False,
         "overlays": [],
         "library": [],
+        "clips": [],
         "segments": [],
     }
 
@@ -159,6 +161,7 @@ def _load_or_bootstrap_timeline(root: Path, timeline_path: Path, topic: str, min
     # arrancar vacío (sin borrar la biblioteca).
     if not bool(data.get("editor_touched", False)) and _looks_autofilled_from_library(data):
         data["segments"] = []
+        data["clips"] = []
         data["desired_seconds"] = 0.0
         data["audio_dirty"] = True
         changed = True
