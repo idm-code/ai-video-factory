@@ -77,6 +77,10 @@ def _register_generation_routes(app, project_service: ProjectService) -> None:
     def api_script_generate():
         return _handle_safe_generation(project_service.safe_generate_script)
 
+    @app.post("/api/project/generate")
+    def api_project_generate():
+        return _handle_safe_generation(project_service.safe_generate_project)
+
     @app.post("/api/audio/generate")
     def api_audio_generate():
         return _handle_safe_generation(project_service.safe_generate_audio)
@@ -84,10 +88,6 @@ def _register_generation_routes(app, project_service: ProjectService) -> None:
     @app.post("/api/subtitles/generate")
     def api_subtitles_generate():
         return _handle_safe_generation(project_service.safe_generate_subtitles)
-
-    @app.post("/api/project/generate")
-    def api_project_generate():
-        return _handle_safe_generation(project_service.safe_generate_project)
 
 
 def _register_font_routes(app, ctx, fonts_service: FontsService) -> None:

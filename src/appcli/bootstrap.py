@@ -25,6 +25,7 @@ def empty_timeline(out_final: Path) -> dict:
         "max_clip_segment_seconds": 6.0,
         "subtitle_style": DEFAULT_SUBTITLE_STYLE.copy(),
         "audio_dirty": False,
+        "audio_offset_seconds": 0.0,
         "editor_touched": False,
         "overlays": [],
         "library": [],
@@ -151,11 +152,10 @@ def _ensure_target_minutes(data: dict, minutes: float) -> bool:
 def _restore_generated_files(data: dict, out_dir: Path) -> bool:
     changed = False
     if not str(data.get("voice_path", "")).strip():
-        for candidate in (out_dir / "voice.mp3", out_dir / "voice.wav"):
-            if candidate.exists():
-                data["voice_path"] = str(candidate.resolve())
-                changed = True
-                break
+        candidate = out_dir / "voice.mp3"
+        if candidate.exists():
+            data["voice_path"] = str(candidate.resolve())
+            changed = True
     srt_candidate = out_dir / "subtitles.srt"
     if not str(data.get("srt_path", "")).strip() and srt_candidate.exists():
         data["srt_path"] = str(srt_candidate.resolve())

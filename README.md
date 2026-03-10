@@ -6,7 +6,8 @@ Editor y pipeline para montar vídeos con clips stock, voz generada, subtítulos
 
 - La UI activa es **React**.
 - Flask sirve la build de React en `/`.
-- El editor legado HTML ya no forma parte del proyecto.
+- La generación de audio usa únicamente [`tts_to_mp3_gtts`](src/tts_gtts.py).
+- El parámetro `--voice` se usa como pista de idioma para gTTS, por ejemplo: `en`, `es`, `fr`.
 - El modo por defecto abre la UI web.
 - El modo `--batch` ejecuta el pipeline automático completo desde CLI.
 
@@ -43,11 +44,12 @@ OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=llama3.1
-
-ELEVENLABS_API_KEY=
-ELEVENLABS_VOICE_ID=
-ELEVENLABS_MODEL=eleven_multilingual_v2
 ```
+
+## Audio
+
+La generación de audio usa únicamente [`tts_to_mp3_gtts`](src/tts_gtts.py).
+El parámetro `--voice` funciona como pista de idioma para gTTS, por ejemplo: `en`, `es`, `fr`.
 
 ## Uso recomendado
 

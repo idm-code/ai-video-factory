@@ -215,6 +215,12 @@ def load_timeline(timeline_path: Path):
     data.setdefault("script_text", "")
     data.setdefault("audio_dirty", False)
 
+    try:
+        data["audio_offset_seconds"] = float(data.get("audio_offset_seconds", 0.0) or 0.0)
+    except Exception:
+        data["audio_offset_seconds"] = 0.0
+        changed = True
+
     if changed:
         timeline_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 

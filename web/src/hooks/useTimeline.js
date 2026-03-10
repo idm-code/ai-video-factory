@@ -2,7 +2,15 @@ import { useState, useMemo, useCallback } from 'react';
 import { getTimeline, saveTimeline } from '../api';
 
 const EMPTY_TIMELINE = {
-  clips: [], script_text: '', target_minutes: 8, voice_path: '', srt_path: '',
+  clips: [],
+  script_text: '',
+  topic: '',
+  target_minutes: 8,
+  voice_path: '',
+  srt_path: '',
+  audio_offset_seconds: 0,
+  audio: null,
+  subtitles: null,
 };
 
 export function useTimeline(toast) {
@@ -12,7 +20,11 @@ export function useTimeline(toast) {
     try {
       const data = await getTimeline();
       const clips = (data.clips || []).map((c) => ({ ...c, path: c.path || c.clip_path || '' }));
-      setTimeline({ ...data, clips });
+      setTimeline({
+        ...data,
+        clips,
+        audio_offset_seconds: Number(data.audio_offset_seconds || 0),
+      });
     } catch (e) {
       toast(`Error cargando: ${e.message}`, 'err');
     }
@@ -22,8 +34,16 @@ export function useTimeline(toast) {
     await saveTimeline({
       clips: timeline.clips || [],
       script_text: timeline.script_text || '',
+      audio_offset_seconds: Number(timeline.audio_offset_seconds || 0),
     });
   }, [timeline]);
+
+  const setAudioOffset = useCallback((value) => {
+    setTimeline((t) => ({
+      ...t,
+      audio_offset_seconds: Number.isFinite(Number(value)) ? Number(value) : 0,
+    }));
+  }, []);
 
   const addClip = useCallback((clip) => {
     setTimeline((t) => ({
@@ -106,11 +126,24 @@ export function useTimeline(toast) {
   const canRender = (timeline.clips || []).length > 0 && hasAudio && hasSubs;
 
   return {
-    timeline, setTimeline,
-    reload, save,
-    addClip, removeClip, toggleClip, moveClip, reorderClips, updateClip, clearClips,
+    timeline,
+    setTimeline,
+    reload,
+    save,
     setScriptText,
-    totalSecs, enabledSecs, enabledClips,
-    hasAudio, hasSubs, canRender,
+    addClip,
+    removeClip,
+    clearClips,
+    toggleClip,
+    moveClip,
+    reorderClips,
+    updateClip,
+    setAudioOffset,
+    totalSecs,
+    enabledSecs,
+    enabledClips,
+    hasAudio,
+    hasSubs,
+    canRender,
   };
 }

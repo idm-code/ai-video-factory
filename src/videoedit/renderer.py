@@ -92,23 +92,30 @@ def concat_segments(normalized_segments: List[Path], out_path: Path) -> Path:
     return tmp_video
 
 
-def mux_audio(tmp_video: Path, normalized_voice: Path, out_path: Path, total_seconds: float) -> Path:
+def mux_audio(tmp_video: Path, normalized_voice: Path, out_path: Path, total_seconds: float, audio_offset_seconds: float = 0.0) -> Path:
     tmp_av = out_path.parent / "tmp_av.mp4"
-    run_command(
-        [
-            "ffmpeg", "-y",
-            "-i", str(tmp_video),
-            "-i", str(normalized_voice),
-            "-map", VIDEO_STREAM, "-map", MUX_AUDIO_STREAM,
-            "-t", f"{total_seconds:.3f}",
-            "-af", "apad,aresample=async=1:first_pts=0",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30", "-g", "60",
-            "-preset", "medium", "-crf", "20",
-            "-c:a", "aac", "-b:a", "192k",
-            "-movflags", "+faststart",
-            str(tmp_av),
-        ]
-    )
+    offset = float(audio_offset_seconds or 0.0)
+
+    cmd = ["ffmpeg", "-y", "-i", str(tmp_video)]
+
+    if offset > 0.001:
+        cmd += ["-itsoffset", f"{offset:.3f}", "-i", str(normalized_voice)]
+    elif offset < -0.001:
+        cmd += ["-ss", f"{abs(offset):.3f}", "-i", str(normalized_voice)]
+    else:
+        cmd += ["-i", str(normalized_voice)]
+
+    cmd += [
+        "-map", VIDEO_STREAM, "-map", MUX_AUDIO_STREAM,
+        "-t", f"{total_seconds:.3f}",
+        "-af", "apad,aresample=async=1:first_pts=0",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30", "-g", "60",
+        "-preset", "medium", "-crf", "20",
+        "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart",
+        str(tmp_av),
+    ]
+    run_command(cmd)
     return tmp_av
 
 

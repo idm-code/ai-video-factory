@@ -7,15 +7,11 @@ from ..editor_web import run_editor
 from ..script_gen import generate_script
 from ..subtitles import whisper_to_srt
 from ..timeline import create_timeline_manifest
-from ..tts_edge import tts_to_mp3_edge
-from ..tts_elevenlabs import tts_to_mp3_elevenlabs
 from ..tts_gtts import tts_to_mp3_gtts
-from ..tts_local import tts_to_wav_local
 from ..video_edit import build_video
 from .bootstrap import bootstrap_timeline
 
 VOICE_MP3 = "voice.mp3"
-VOICE_WAV = "voice.wav"
 
 
 @dataclass
@@ -23,9 +19,7 @@ class CliArgs:
     topic: list
     minutes: float
     voice: str
-    tts_provider: str
     script_provider: str
-    speech_rate: str
     clips: int
     ui_port: int
     batch: bool
@@ -54,6 +48,13 @@ def run_ui_mode(paths: CliPaths, topic: str, minutes: float, port: int) -> None:
     run_editor(workspace_root=paths.root, timeline_path=paths.timeline_path, port=port)
 
 
+def create_voiceover(out_dir: Path, script_text: str, voice: str) -> Path:
+    lang = (voice or "en").split("-")[0].split("_")[0].lower() or "en"
+    voice_path = out_dir / VOICE_MP3
+    tts_to_mp3_gtts(text=script_text, out_path=voice_path, lang=lang)
+    return voice_path
+
+
 def run_batch_mode(args: CliArgs, settings: Settings, paths: CliPaths, topic: str) -> None:
     print(f"\n[1/5] Generating script for: {topic}")
     script_text = generate_script(
@@ -69,8 +70,8 @@ def run_batch_mode(args: CliArgs, settings: Settings, paths: CliPaths, topic: st
     script_path.write_text(script_text, encoding="utf-8")
     print(f"Saved script: {script_path}")
 
-    print(f"\n[2/5] Generating voiceover ({args.tts_provider})")
-    voice_path = create_voiceover(args=args, settings=settings, out_dir=paths.out, script_text=script_text)
+    print("\n[2/5] Generating voiceover (gtts)")
+    voice_path = create_voiceover(out_dir=paths.out, script_text=script_text, voice=args.voice)
     print(f"Saved voice: {voice_path}")
 
     print("\n[3/5] Downloading clips from Pexels")
@@ -109,59 +110,3 @@ def run_batch_mode(args: CliArgs, settings: Settings, paths: CliPaths, topic: st
     )
     print(f"\nDONE ✅ Video exported: {final_path}\n")
 
-
-def create_voiceover(args: CliArgs, settings: Settings, out_dir: Path, script_text: str) -> Path:
-    if args.tts_provider == "elevenlabs":
-        return _create_elevenlabs_voice(settings, out_dir, script_text)
-    if args.tts_provider == "local":
-        return _create_local_voice(out_dir, script_text, args.voice)
-    if args.tts_provider == "gtts":
-        return _create_gtts_voice_with_fallback(out_dir, script_text, args.voice)
-    return _create_edge_voice_with_fallback(out_dir, script_text, args.voice, args.speech_rate)
-
-
-def _create_elevenlabs_voice(settings: Settings, out_dir: Path, script_text: str) -> Path:
-    if not settings.ELEVENLABS_API_KEY or not settings.ELEVENLABS_VOICE_ID:
-        raise RuntimeError("ELEVENLABS_API_KEY / ELEVENLABS_VOICE_ID missing in .env")
-    voice_path = out_dir / VOICE_MP3
-    tts_to_mp3_elevenlabs(
-        text=script_text,
-        out_path=voice_path,
-        api_key=settings.ELEVENLABS_API_KEY,
-        voice_id=settings.ELEVENLABS_VOICE_ID,
-        model_id=settings.ELEVENLABS_MODEL,
-    )
-    return voice_path
-
-
-def _create_local_voice(out_dir: Path, script_text: str, voice: str) -> Path:
-    voice_path = out_dir / VOICE_WAV
-    tts_to_wav_local(text=script_text, out_path=voice_path, lang=voice)
-    return voice_path
-
-
-def _create_gtts_voice_with_fallback(out_dir: Path, script_text: str, voice: str) -> Path:
-    lang_hint = _lang_hint(voice)
-    try:
-        voice_path = out_dir / VOICE_MP3
-        tts_to_mp3_gtts(text=script_text, out_path=voice_path, lang=lang_hint)
-        return voice_path
-    except Exception:
-        print("gTTS failed, falling back to local TTS")
-        voice_path = out_dir / VOICE_WAV
-        tts_to_wav_local(text=script_text, out_path=voice_path, lang=lang_hint)
-        return voice_path
-
-
-def _create_edge_voice_with_fallback(out_dir: Path, script_text: str, voice: str, speech_rate: str) -> Path:
-    voice_path = out_dir / VOICE_MP3
-    try:
-        tts_to_mp3_edge(text=script_text, out_path=voice_path, voice=voice, rate=speech_rate)
-        return voice_path
-    except Exception:
-        print("Edge-TTS failed, falling back to gTTS")
-    return _create_gtts_voice_with_fallback(out_dir, script_text, voice)
-
-
-def _lang_hint(voice: str) -> str:
-    return (voice or "en").split("-")[0].split("_")[0].lower() or "en"

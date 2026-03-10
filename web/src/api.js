@@ -56,24 +56,6 @@ export async function generateSubtitles(payload) {
   return parse(res);
 }
 
-export async function generateScript(payload) {
-  const res = await fetch('/api/script/generate', {
-    method: 'POST',
-    headers: jsonHeaders,
-    body: JSON.stringify(payload),
-  });
-  return parse(res);
-}
-
-export async function generateProject(payload) {
-  const res = await fetch('/api/project/generate', {
-    method: 'POST',
-    headers: jsonHeaders,
-    body: JSON.stringify(payload),
-  });
-  return parse(res);
-}
-
 export async function renderFinal() {
   const res = await fetch('/api/render', {
     method: 'POST',

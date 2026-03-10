@@ -64,13 +64,22 @@ export default function App() {
   }
 
   async function onGenAudio() {
-    setBusy(true); toast('Generando audio...');
+    setBusy(true);
+    toast('Generando audio...');
     try {
       await tl.save();
-      await generateAudio({ topic: search.q.trim() || tl.timeline.topic || 'video', script_text: tl.timeline.script_text || '', tts_provider: 'gtts', voice: 'en', speech_rate: '+0%' });
-      await tl.reload(); toast('Audio listo ✓', 'ok');
-    } catch (e) { toast(`Error audio: ${e.message}`, 'err'); }
-    finally { setBusy(false); }
+      await generateAudio({
+        topic: search.q.trim() || tl.timeline.topic || 'video',
+        script_text: tl.timeline.script_text || '',
+        voice: 'en',
+      });
+      await tl.reload();
+      toast('Audio listo ✓', 'ok');
+    } catch (e) {
+      toast(`Error audio: ${e.message}`, 'err');
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function onGenSubs() {
@@ -149,6 +158,9 @@ export default function App() {
         onDropFromLibrary={onAdd}
         audioName={tl.timeline.audio?.name}
         subsName={tl.timeline.subtitles?.name}
+        audioPath={tl.timeline.voice_path}
+        audioOffsetSeconds={tl.timeline.audio_offset_seconds || 0}
+        onAudioOffsetChange={tl.setAudioOffset}
       />
     </div>
   );

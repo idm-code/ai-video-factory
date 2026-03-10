@@ -17,6 +17,7 @@ def build_video(
     timeline_segments=None,
     subtitle_style: Optional[Dict[str, Any]] = None,
     overlays: Optional[List[Dict[str, Any]]] = None,
+    audio_offset_seconds: float = 0.0,
 ):
     voice_path = Path(voice_path)
     srt_path = Path(srt_path)
@@ -31,7 +32,13 @@ def build_video(
     used_meta = build_used_metadata(used_segments)
     tmp_video = concat_segments(normalized_segments, out_path)
     total_seconds = _total_seconds(tmp_video, desired_seconds, bool(timeline_segments))
-    tmp_av = mux_audio(tmp_video, normalized_voice, out_path, total_seconds)
+    tmp_av = mux_audio(
+        tmp_video=tmp_video,
+        normalized_voice=normalized_voice,
+        out_path=out_path,
+        total_seconds=total_seconds,
+        audio_offset_seconds=float(audio_offset_seconds or 0.0),
+    )
     finalize_output(tmp_av, out_path, srt_path, subtitle_style, overlays, used_meta)
 
 

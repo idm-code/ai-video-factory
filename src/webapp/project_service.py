@@ -5,27 +5,15 @@ from typing import Optional
 
 from flask import Response
 
-from ..script_gen import generate_script
 from ..subtitles import whisper_to_srt
 from ..timeline import load_timeline, save_timeline
-from ..tts_edge import tts_to_mp3_edge
-from ..tts_elevenlabs import tts_to_mp3_elevenlabs
 from ..tts_gtts import tts_to_mp3_gtts
-from ..tts_local import tts_to_wav_local
 from ..video_edit import build_video
 from .common import actual_media_duration, clip_signature, is_image_file, is_inside
 from .context import EditorContext
 
-TOPIC_REQUIRED = "topic is required"
 VOICE_MP3 = "voice.mp3"
-DEFAULT_SUBTITLE_STYLE = {
-    "font_family": "Arial",
-    "font_file": "",
-    "font_size": 18,
-    "primary_color": "&H00FFFFFF",
-    "outline_color": "&H00000000",
-    "outline": 2,
-}
+TOPIC_REQUIRED = "topic is required"
 
 
 class ProjectService:
@@ -46,7 +34,7 @@ class ProjectService:
         return resp
 
     def persist_editor_payload_if_present(self, payload: dict) -> None:
-        if any(key in payload for key in ("clips", "library", "overlays", "subtitle_style", "script_text")):
+        if any(key in payload for key in ("clips", "library", "overlays", "subtitle_style", "script_text", "audio_offset_seconds")):
             self.save_from_editor(payload)
 
     def read_script_text(self) -> str:
@@ -100,6 +88,15 @@ class ProjectService:
     def get_timeline_payload(self) -> dict:
         data = load_timeline(self.ctx.timeline_path)
         clips = [self._segment_to_editor_clip(seg) for seg in data.get("segments", [])]
+
+        audio_rev = ""
+        voice_path_raw = str(data.get("voice_path", "") or "").strip()
+        if voice_path_raw:
+            voice_file = Path(voice_path_raw)
+            if voice_file.exists():
+                stat = voice_file.stat()
+                audio_rev = f"{int(stat.st_mtime_ns)}-{stat.st_size}"
+
         return {
             "clips": clips,
             "script_text": data.get("script_text", ""),
@@ -107,6 +104,8 @@ class ProjectService:
             "topic": data.get("topic", ""),
             "voice_path": data.get("voice_path", ""),
             "srt_path": data.get("srt_path", ""),
+            "audio_offset_seconds": float(data.get("audio_offset_seconds", 0.0) or 0.0),
+            "audio_rev": audio_rev,
             "audio": {"name": Path(data["voice_path"]).name} if data.get("voice_path") and Path(data["voice_path"]).exists() else None,
             "subtitles": {"name": Path(data["srt_path"]).name} if data.get("srt_path") and Path(data["srt_path"]).exists() else None,
         }
@@ -125,16 +124,7 @@ class ProjectService:
         save_timeline(self.ctx.timeline_path, data)
         return data
 
-    def create_voice_from_text(self, text: str, tts_provider: str, voice: str, speech_rate: str) -> Path:
-        tts_provider = (tts_provider or "gtts").lower()
-        if tts_provider == "elevenlabs":
-            return self._create_elevenlabs_voice(text)
-        if tts_provider == "local":
-            return self._create_local_voice(text, voice)
-        if tts_provider == "edge":
-            voice_path = self._edge_voice(text, voice, speech_rate)
-            if voice_path is not None:
-                return voice_path
+    def create_voice_from_text(self, text: str, voice: str) -> Path:
         return self._create_gtts_voice(text, voice)
 
     def generate_script_only(self, payload: dict) -> dict:
@@ -165,11 +155,10 @@ class ProjectService:
 
         requested_minutes = float(payload.get("minutes", current.get("target_minutes", 8.0) or 8.0))
         effective_minutes = max(1.0, timeline_seconds / 60.0)
-        tts_provider = str(payload.get("tts_provider", "gtts")).strip() or "gtts"
         voice = str(payload.get("voice", "en")).strip() or "en"
-        speech_rate = str(payload.get("speech_rate", "+0%")).strip() or "+0%"
 
-        voice_path = self.create_voice_from_text(text=script_text, tts_provider=tts_provider, voice=voice, speech_rate=speech_rate)
+        voice_path = self.create_voice_from_text(text=script_text, voice=voice)
+
         current["topic"] = topic
         current["target_minutes"] = float(requested_minutes)
         current["desired_seconds"] = float(max(timeline_seconds, effective_minutes * 60.0))
@@ -205,14 +194,13 @@ class ProjectService:
         effective_minutes = max(1.0, timeline_seconds / 60.0)
         script_text = str(payload.get("script_text", "")).strip()
         script_provider = str(payload.get("script_provider", "auto")).strip() or "auto"
-        tts_provider = str(payload.get("tts_provider", "gtts")).strip() or "gtts"
         voice = str(payload.get("voice", "en")).strip() or "en"
-        speech_rate = str(payload.get("speech_rate", "+0%")).strip() or "+0%"
+
         if not script_text:
             script_text = self._generate_script(topic, effective_minutes, script_provider)
 
         script_path = self.write_script_text(script_text)
-        voice_path = self.create_voice_from_text(script_text, tts_provider, voice, speech_rate)
+        voice_path = self.create_voice_from_text(script_text, voice)
         srt_path = self.ctx.out_dir / "subtitles.srt"
         whisper_to_srt(audio_path=voice_path, srt_path=srt_path)
 
@@ -260,6 +248,7 @@ class ProjectService:
             timeline_segments=segments,
             subtitle_style=data.get("subtitle_style", {}),
             overlays=data.get("overlays", []),
+            audio_offset_seconds=float(data.get("audio_offset_seconds", 0.0) or 0.0),
         )
         return {"ok": True, "out_path": data["out_path"]}
 
@@ -307,7 +296,7 @@ class ProjectService:
         return normalized
 
     def _apply_dirty_flag(self, data: dict, old_segments: list[dict], cleaned_clips: list[dict]) -> None:
-        if clip_signature(old_segments) != clip_signature(cleaned_clips):
+        if not self._segments_equal_for_audio(old_segments, cleaned_clips):
             data["audio_dirty"] = True
 
     def _apply_editor_metadata(self, data: dict, payload: dict) -> None:
@@ -319,6 +308,11 @@ class ProjectService:
             data["overlays"] = payload.get("overlays", []) or []
         if "subtitle_style" in payload:
             data["subtitle_style"] = payload.get("subtitle_style", {}) or {}
+        if "audio_offset_seconds" in payload:
+            try:
+                data["audio_offset_seconds"] = float(payload.get("audio_offset_seconds", 0.0) or 0.0)
+            except Exception:
+                data["audio_offset_seconds"] = 0.0
 
     def _resolve_topic(self, payload: dict, current: dict) -> str:
         topic = str(payload.get("topic", current.get("topic", ""))).strip()
@@ -340,33 +334,6 @@ class ProjectService:
             provider=provider,
         )
 
-    def _create_elevenlabs_voice(self, text: str) -> Path:
-        if not self.ctx.settings.ELEVENLABS_API_KEY or not self.ctx.settings.ELEVENLABS_VOICE_ID:
-            raise RuntimeError("ELEVENLABS_API_KEY / ELEVENLABS_VOICE_ID missing in .env")
-        voice_path = self.ctx.out_dir / VOICE_MP3
-        tts_to_mp3_elevenlabs(
-            text=text,
-            out_path=voice_path,
-            api_key=self.ctx.settings.ELEVENLABS_API_KEY,
-            voice_id=self.ctx.settings.ELEVENLABS_VOICE_ID,
-            model_id=self.ctx.settings.ELEVENLABS_MODEL,
-        )
-        return voice_path
-
-    def _create_local_voice(self, text: str, voice: str) -> Path:
-        lang = (voice or "en").split("-")[0].split("_")[0].lower() or "en"
-        voice_path = self.ctx.out_dir / "voice.wav"
-        tts_to_wav_local(text=text, out_path=voice_path, lang=lang)
-        return voice_path
-
-    def _edge_voice(self, text: str, voice: str, speech_rate: str) -> Optional[Path]:
-        voice_path = self.ctx.out_dir / VOICE_MP3
-        try:
-            tts_to_mp3_edge(text=text, out_path=voice_path, voice=voice or "en-US-EmmaNeural", rate=speech_rate or "+0%")
-            return voice_path
-        except Exception:
-            return None
-
     def _create_gtts_voice(self, text: str, voice: str) -> Path:
         lang = (voice or "en").split("-")[0].split("_")[0].lower() or "en"
         voice_path = self.ctx.out_dir / VOICE_MP3
@@ -381,3 +348,19 @@ class ProjectService:
         except Exception as exc:
             traceback.print_exc()
             return None, Response(f"{prefix}: {exc}", status=500)
+
+    def _segments_equal_for_audio(self, left: list[dict], right: list[dict]) -> bool:
+        def norm(items: list[dict]) -> list[dict]:
+            normalized = []
+            for seg in items or []:
+                normalized.append(
+                    {
+                        "clip_path": str(seg.get("clip_path", "") or ""),
+                        "start": round(float(seg.get("start", 0.0) or 0.0), 3),
+                        "duration": round(float(seg.get("duration", 0.0) or 0.0), 3),
+                        "enabled": bool(seg.get("enabled", True)),
+                    }
+                )
+            return normalized
+
+        return norm(left) == norm(right)
