@@ -9,6 +9,7 @@ const EMPTY_TIMELINE = {
   voice_path: '',
   srt_path: '',
   audio_offset_seconds: 0,
+  voice_speed: 1.0,
   audio: null,
   subtitles: null,
 };
@@ -24,6 +25,7 @@ export function useTimeline(toast) {
         ...data,
         clips,
         audio_offset_seconds: Number(data.audio_offset_seconds || 0),
+        voice_speed: Number(data.voice_speed || 1.0),
       });
     } catch (e) {
       toast(`Error cargando: ${e.message}`, 'err');
@@ -35,6 +37,7 @@ export function useTimeline(toast) {
       clips: timeline.clips || [],
       script_text: timeline.script_text || '',
       audio_offset_seconds: Number(timeline.audio_offset_seconds || 0),
+      voice_speed: Number(timeline.voice_speed || 1.0),
     });
   }, [timeline]);
 
@@ -42,6 +45,13 @@ export function useTimeline(toast) {
     setTimeline((t) => ({
       ...t,
       audio_offset_seconds: Number.isFinite(Number(value)) ? Number(value) : 0,
+    }));
+  }, []);
+
+  const setVoiceSpeed = useCallback((value) => {
+    setTimeline((t) => ({
+      ...t,
+      voice_speed: Number.isFinite(Number(value)) ? Math.max(0.25, Math.min(4.0, Number(value))) : 1.0,
     }));
   }, []);
 
@@ -139,6 +149,7 @@ export function useTimeline(toast) {
     reorderClips,
     updateClip,
     setAudioOffset,
+    setVoiceSpeed,
     totalSecs,
     enabledSecs,
     enabledClips,

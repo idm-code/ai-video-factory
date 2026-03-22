@@ -105,6 +105,7 @@ class ProjectService:
             "voice_path": data.get("voice_path", ""),
             "srt_path": data.get("srt_path", ""),
             "audio_offset_seconds": float(data.get("audio_offset_seconds", 0.0) or 0.0),
+            "voice_speed": float(data.get("voice_speed", 1.0) or 1.0),
             "audio_rev": audio_rev,
             "audio": {"name": Path(data["voice_path"]).name} if data.get("voice_path") and Path(data["voice_path"]).exists() else None,
             "subtitles": {"name": Path(data["srt_path"]).name} if data.get("srt_path") and Path(data["srt_path"]).exists() else None,
@@ -124,8 +125,8 @@ class ProjectService:
         save_timeline(self.ctx.timeline_path, data)
         return data
 
-    def create_voice_from_text(self, text: str, voice: str) -> Path:
-        return self._create_gtts_voice(text, voice)
+    def create_voice_from_text(self, text: str, voice: str, speed: float = 1.0) -> Path:
+        return self._create_gtts_voice(text, voice, speed)
 
     def generate_script_only(self, payload: dict) -> dict:
         self.persist_editor_payload_if_present(payload)
@@ -156,14 +157,16 @@ class ProjectService:
         requested_minutes = float(payload.get("minutes", current.get("target_minutes", 8.0) or 8.0))
         effective_minutes = max(1.0, timeline_seconds / 60.0)
         voice = str(payload.get("voice", "en")).strip() or "en"
+        voice_speed = max(0.25, min(4.0, float(payload.get("voice_speed", current.get("voice_speed", 1.0)) or 1.0)))
 
-        voice_path = self.create_voice_from_text(text=script_text, voice=voice)
+        voice_path = self.create_voice_from_text(text=script_text, voice=voice, speed=voice_speed)
 
         current["topic"] = topic
         current["target_minutes"] = float(requested_minutes)
         current["desired_seconds"] = float(max(timeline_seconds, effective_minutes * 60.0))
         current["script_text"] = script_text
         current["voice_path"] = str(Path(voice_path).resolve())
+        current["voice_speed"] = float(voice_speed)
         current["audio_dirty"] = False
         save_timeline(self.ctx.timeline_path, current)
         self.write_script_text(script_text)
@@ -195,12 +198,13 @@ class ProjectService:
         script_text = str(payload.get("script_text", "")).strip()
         script_provider = str(payload.get("script_provider", "auto")).strip() or "auto"
         voice = str(payload.get("voice", "en")).strip() or "en"
+        voice_speed = max(0.25, min(4.0, float(payload.get("voice_speed", current.get("voice_speed", 1.0)) or 1.0)))
 
         if not script_text:
             script_text = self._generate_script(topic, effective_minutes, script_provider)
 
         script_path = self.write_script_text(script_text)
-        voice_path = self.create_voice_from_text(script_text, voice)
+        voice_path = self.create_voice_from_text(script_text, voice, voice_speed)
         srt_path = self.ctx.out_dir / "subtitles.srt"
         whisper_to_srt(audio_path=voice_path, srt_path=srt_path)
 
@@ -210,6 +214,7 @@ class ProjectService:
         current["script_text"] = script_text
         current["voice_path"] = str(Path(voice_path).resolve())
         current["srt_path"] = str(Path(srt_path).resolve())
+        current["voice_speed"] = float(voice_speed)
         current["audio_dirty"] = False
         current.setdefault("library", [])
         current.setdefault("segments", [])
@@ -313,6 +318,11 @@ class ProjectService:
                 data["audio_offset_seconds"] = float(payload.get("audio_offset_seconds", 0.0) or 0.0)
             except Exception:
                 data["audio_offset_seconds"] = 0.0
+        if "voice_speed" in payload:
+            try:
+                data["voice_speed"] = max(0.25, min(4.0, float(payload.get("voice_speed", 1.0) or 1.0)))
+            except Exception:
+                data["voice_speed"] = 1.0
 
     def _resolve_topic(self, payload: dict, current: dict) -> str:
         topic = str(payload.get("topic", current.get("topic", ""))).strip()
@@ -334,10 +344,10 @@ class ProjectService:
             provider=provider,
         )
 
-    def _create_gtts_voice(self, text: str, voice: str) -> Path:
+    def _create_gtts_voice(self, text: str, voice: str, speed: float = 1.0) -> Path:
         lang = (voice or "en").split("-")[0].split("_")[0].lower() or "en"
         voice_path = self.ctx.out_dir / VOICE_MP3
-        tts_to_mp3_gtts(text=text, out_path=voice_path, lang=lang)
+        tts_to_mp3_gtts(text=text, out_path=voice_path, lang=lang, speed=speed)
         return voice_path
 
     def _run_guarded(self, fn, payload: dict, prefix: str):

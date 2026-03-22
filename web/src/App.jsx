@@ -72,6 +72,7 @@ export default function App() {
         topic: search.q.trim() || tl.timeline.topic || 'video',
         script_text: tl.timeline.script_text || '',
         voice: 'en',
+        voice_speed: Number(tl.timeline.voice_speed || 1.0),
       });
       await tl.reload();
       toast('Audio listo ✓', 'ok');
@@ -107,11 +108,95 @@ export default function App() {
     }
   }
 
+  const [clipboardCount, setClipboardCount] = useState(0);
+  const clipboardRef = useRef([]);
+
+  const makeClipId = useCallback(
+    () => (window.crypto?.randomUUID ? window.crypto.randomUUID() : `clip_${Date.now()}_${Math.random().toString(16).slice(2)}`),
+    []
+  );
+
+  const copyClips = useCallback((mode = 'selected') => {
+    const all = tl.timeline.clips || [];
+    const source = mode === 'all' ? all : all.filter((c) => selectedIds.has(c.id));
+    if (!source.length) {
+      toast(mode === 'all' ? 'No hay clips para copiar' : 'Selecciona al menos un clip', 'err');
+      return;
+    }
+    clipboardRef.current = source.map((c) => ({
+      name: c.name,
+      path: c.path || c.clip_path || '',
+      start: Number(c.start || 0),
+      duration: Math.max(1, Number(c.duration || 4)),
+      enabled: c.enabled !== false,
+    }));
+    setClipboardCount(clipboardRef.current.length);
+    toast(`${clipboardRef.current.length} clip(s) copiados ✓`, 'ok');
+  }, [tl.timeline.clips, selectedIds, toast]);
+
+  const pasteClips = useCallback(() => {
+    const payload = clipboardRef.current || [];
+    if (!payload.length) {
+      toast('Portapapeles vacío', 'err');
+      return;
+    }
+
+    const selectedNow = new Set(selectedIds);
+    let insertedIds = [];
+
+    tl.setTimeline((t) => {
+      const clips = [...(t.clips || [])];
+      const selectedIndexes = clips
+        .map((c, i) => (selectedNow.has(c.id) ? i : -1))
+        .filter((i) => i >= 0);
+      const insertAt = selectedIndexes.length ? Math.max(...selectedIndexes) + 1 : clips.length;
+
+      const clones = payload.map((c) => ({ ...c, id: makeClipId() }));
+      insertedIds = clones.map((c) => c.id);
+
+      return {
+        ...t,
+        clips: [...clips.slice(0, insertAt), ...clones, ...clips.slice(insertAt)],
+      };
+    });
+
+    setSelectedIds(new Set(insertedIds));
+    toast(`${payload.length} clip(s) pegados ✓`, 'ok');
+  }, [selectedIds, tl, makeClipId, toast]);
+
+  useEffect(() => {
+    function isEditableTarget(el) {
+      const tag = (el?.tagName || '').toLowerCase();
+      return tag === 'input' || tag === 'textarea' || el?.isContentEditable;
+    }
+
+    function onKeyDown(e) {
+      if (!(e.ctrlKey || e.metaKey) || isEditableTarget(e.target)) return;
+      const key = String(e.key || '').toLowerCase();
+      if (key === 'c') {
+        e.preventDefault();
+        copyClips('selected');
+      } else if (key === 'v') {
+        e.preventDefault();
+        pasteClips();
+      } else if (key === 'a' && e.shiftKey) {
+        // Ctrl/Cmd+Shift+A => copiar todos
+        e.preventDefault();
+        copyClips('all');
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [copyClips, pasteClips]);
+
   return (
     <div style={S.app}>
       <Topbar
         busy={busy} canRender={tl.canRender} hasAudio={tl.hasAudio} hasSubs={tl.hasSubs}
         status={status} onSave={onSave} onGenAudio={onGenAudio} onGenSubs={onGenSubs} onRender={onRender}
+        voiceSpeed={tl.timeline.voice_speed || 1.0}
+        onVoiceSpeedChange={tl.setVoiceSpeed}
       />
       <Sidebar
         scriptText={tl.timeline.script_text}
@@ -161,6 +246,11 @@ export default function App() {
         audioPath={tl.timeline.voice_path}
         audioOffsetSeconds={tl.timeline.audio_offset_seconds || 0}
         onAudioOffsetChange={tl.setAudioOffset}
+        selectedCount={selectedIds.size}
+        canPaste={clipboardCount > 0}
+        onCopySelected={() => copyClips('selected')}
+        onCopyAll={() => copyClips('all')}
+        onPaste={pasteClips}
       />
     </div>
   );

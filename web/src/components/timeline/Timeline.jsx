@@ -16,6 +16,7 @@ export default function Timeline({
   clips, totalSecs, enabledSecs, selectedIds, hasAudio, hasSubs,
   onSelect, onRemove, onToggle, onMoveLeft, onMoveRight, onReorder, onClear, onDropFromLibrary,
   audioName, subsName, audioPath, audioOffsetSeconds, onAudioOffsetChange, audioRev,
+  selectedCount, canPaste, onCopySelected, onCopyAll, onPaste,
 }) {
   const [audioSeconds, setAudioSeconds] = useState(0);
   const audioUrl = useMemo(
@@ -49,6 +50,32 @@ export default function Timeline({
           {clips.length} clips · {fmtTime(totalSecs)} total · {fmtTime(enabledSecs)} activo
         </span>
         <div style={{ flex: 1 }} />
+
+        <button
+          onClick={onCopySelected}
+          disabled={!selectedCount}
+          style={{ ...S.btn, padding: '2px 8px', fontSize: 10, opacity: selectedCount ? 1 : 0.6 }}
+          title="Copiar clips seleccionados"
+        >
+          Copiar sel.
+        </button>
+        <button
+          onClick={onCopyAll}
+          disabled={clips.length === 0}
+          style={{ ...S.btn, padding: '2px 8px', fontSize: 10, opacity: clips.length ? 1 : 0.6 }}
+          title="Copiar todos los clips"
+        >
+          Copiar todo
+        </button>
+        <button
+          onClick={onPaste}
+          disabled={!canPaste}
+          style={{ ...S.btn, padding: '2px 8px', fontSize: 10, opacity: canPaste ? 1 : 0.6 }}
+          title="Pegar clips copiados"
+        >
+          Pegar
+        </button>
+
         {clips.length > 0 && (
           <button onClick={onClear} style={{ ...S.btn, padding: '2px 8px', fontSize: 10, color: C.danger, borderColor: C.danger }}>
             🗑 Limpiar

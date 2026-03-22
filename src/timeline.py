@@ -229,3 +229,30 @@ def load_timeline(timeline_path: Path):
 
 def save_timeline(timeline_path: Path, data):
     Path(timeline_path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def copy_clip(timeline: dict, clip_id: str) -> dict:
+    """Devuelve una copia profunda del clip con un nuevo ID único."""
+    import copy, uuid
+    for track in timeline.get("tracks", []):
+        for clip in track.get("clips", []):
+            if clip["id"] == clip_id:
+                new_clip = copy.deepcopy(clip)
+                new_clip["id"] = str(uuid.uuid4())
+                return new_clip
+    raise ValueError(f"Clip '{clip_id}' no encontrado en el timeline.")
+
+
+def paste_clip(timeline: dict, clip: dict, track_index: int, start: float) -> dict:
+    """Inserta el clip copiado en el track indicado con el nuevo tiempo de inicio."""
+    import copy
+    new_clip = copy.deepcopy(clip)
+    new_clip["start"] = start
+    new_clip["end"] = start + (clip["end"] - clip["start"])
+    tracks = timeline.get("tracks", [])
+    if track_index < 0 or track_index >= len(tracks):
+        raise IndexError(f"Track index {track_index} fuera de rango.")
+    tracks[track_index]["clips"].append(new_clip)
+    # Ordenar clips por start
+    tracks[track_index]["clips"].sort(key=lambda c: c["start"])
+    return timeline
